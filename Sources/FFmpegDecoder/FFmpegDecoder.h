@@ -1,19 +1,18 @@
-
-#import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import "libavformat/avformat.h"
+#import "libavutil/imgutils.h"
 #import "libavcodec/avcodec.h"
-#import "libavutil/avutil.h"
 #import "libswscale/swscale.h"
-#import "libswresample/swresample.h"
-#import "libavfilter/avfilter.h"
+#import <CoreImage/CoreImage.h>
+#import <CoreGraphics/CoreGraphics.h>
 
 @protocol DecoderDelegate <NSObject>
 
-- (void) receivedDecodedImage:(UIImage *)image;
+- (void)receivedDecodedCIImage:(CIImage *)ciImage context:(CIContext *)ciContext size:(CGSize)size;
 - (void) receivedCurrentTime:(int64_t)currentTime duration:(int64_t)duration;
-- (void) receivedState:(int64_t)state; // 0: initialized, 1: preparing, 2: readyToPlay, 3: buffering, 4: bufferFinished, 5: paused, 6: playedToTheEnd, 7: error
+- (void) receivedState:(int64_t)state; // 0: initialized, 1: preparing, 2: readyToPlay, 3: buffering, 4: bufferFinished, 5: paused, 6: playedToTheEnd, 7: error, 8: stop
 - (void) receivedSeekingState:(BOOL)success;
+- (void) receivedVideoSize:(CGSize)videoSize;
 
 @end
 
@@ -29,5 +28,6 @@
 - (void) pause;
 - (void) resume;
 - (void) seek:(double)seconds;
+- (void) setBrightness:(double)bright contrast:(double)contrast;
 - (BOOL) isPlaying;
 @end
