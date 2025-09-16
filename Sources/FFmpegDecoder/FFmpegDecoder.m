@@ -22,7 +22,6 @@
     int64_t ptsOffset;           // 누적 offset
     BOOL hasPendingSeek;         // seek 직후 첫 프레임에서 보정할 플래그
     double pendingSeekSeconds;   // 사용자가 요청한 seek 시간
-    double seekOffset;       // seek 후 PTS 보정용 offset
     double currentBrightness, currentContrast;
     int currentState;
     float prevContrast, prevBrightness;
@@ -90,9 +89,6 @@
     self->decodingStopped = YES;
     [self->pauseCondition signal];
     [self->pauseCondition unlock];
-    if (currentState != 8) {
-        [self sendCurrentState:8];
-    }
 }
 
 - (BOOL)isPlaying {
