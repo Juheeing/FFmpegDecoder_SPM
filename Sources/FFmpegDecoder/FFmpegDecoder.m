@@ -509,31 +509,6 @@
         self->prevContrast = self->currentContrast;
         self->prevBrightness = self->currentBrightness;
     }
-
-    // PTS 계산
-    int64_t framePts = (vFrame->pts != AV_NOPTS_VALUE) ? vFrame->pts : vFrame->best_effort_timestamp;
-    double ptsSeconds = av_q2d(pVStream->time_base) * framePts;
-
-    static double lastPts = -1;
-    double delay = 0;
-
-    if (lastPts < 0 || hasPendingSeek) {
-        // ✅ seek 직후 또는 초기화 시에는 기준만 세팅
-        delay = 0;
-        hasPendingSeek = NO;   // seek 처리 완료 표시
-    } else {
-        delay = ptsSeconds - lastPts;
-        if (delay < 0 || delay > 1.0) {
-            // 🚨 잘못된 delay (예: 음수, 너무 큰 jump)은 무시
-            delay = 0;
-        }
-    }
-
-    lastPts = ptsSeconds;
-
-    if (delay > 0) {
-        usleep((useconds_t)(delay * 1e6));
-    }
     
     // 5️⃣ GPU 컨텍스트 재사용
     static CIContext *ciContext = nil;
