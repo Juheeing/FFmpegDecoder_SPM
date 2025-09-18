@@ -8,7 +8,7 @@
 
 @protocol DecoderDelegate <NSObject>
 
-- (void)receivedDecodedCIImage:(CIImage *)ciImage context:(CIContext *)ciContext size:(CGSize)size;
+- (void)receivedDecodedCIImage:(CIImage *)ciImage;
 - (void) receivedCurrentTime:(int64_t)currentTime duration:(int64_t)duration;
 - (void) receivedState:(int64_t)state; // 0: initialized, 1: preparing, 2: readyToPlay, 3: buffering, 4: bufferFinished, 5: paused, 6: playedToTheEnd, 7: error, 8: stop
 - (void) receivedSeekingState:(BOOL)success;

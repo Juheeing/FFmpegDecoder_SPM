@@ -85,6 +85,9 @@
 
 - (void)stopDecoding {
     NSLog(@"FFmpeg## stopDecoding");
+    if (currentState != 0) {
+        [self sendCurrentState:0];
+    }
     [self->pauseCondition lock];
     self->decodingStopped = YES;
     [self->pauseCondition signal];
@@ -509,15 +512,9 @@
         self->prevContrast = self->currentContrast;
         self->prevBrightness = self->currentBrightness;
     }
-    
-    // 5️⃣ GPU 컨텍스트 재사용
-    static CIContext *ciContext = nil;
-    if (!ciContext) {
-        ciContext = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @NO}];
-    }
-    // 6️⃣ delegate에 CIImage 직접 전달
+    // 5️⃣ delegate에 CIImage 직접 전달
     dispatch_sync(dispatch_get_main_queue(), ^{
-        [self->_delegate receivedDecodedCIImage:outputImage context:ciContext size:CGSizeMake(width, height)];
+        [self->_delegate receivedDecodedCIImage:outputImage];
     });
 }
 
