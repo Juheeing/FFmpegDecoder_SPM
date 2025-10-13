@@ -39,7 +39,7 @@ let package = Package(
                 .linkedLibrary("resolv"),
                 // FFmpeg 정적 라이브러리
                 .unsafeFlags([
-                    "-L../libs",
+                    "-L\(String(describing: #filePath).dropLast(13))/libs",
                     "-lavcodec",
                     "-lavfilter",
                     "-lavformat",
