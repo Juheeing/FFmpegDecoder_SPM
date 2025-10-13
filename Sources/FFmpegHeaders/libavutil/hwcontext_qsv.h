@@ -16,20 +16,38 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef SWSCALE_VERSION_MAJOR_H
-#define SWSCALE_VERSION_MAJOR_H
+#ifndef AVUTIL_HWCONTEXT_QSV_H
+#define AVUTIL_HWCONTEXT_QSV_H
+
+#include <mfx/mfxvideo.h>
 
 /**
  * @file
- * swscale version macros
+ * An API-specific header for AV_HWDEVICE_TYPE_QSV.
+ *
+ * This API does not support dynamic frame pools. AVHWFramesContext.pool must
+ * contain AVBufferRefs whose data pointer points to an mfxFrameSurface1 struct.
  */
-
-#define LIBSWSCALE_VERSION_MAJOR   7
 
 /**
- * FF_API_* defines may be placed below to indicate public API that will be
- * dropped at a future version bump. The defines themselves are not part of
- * the public API and may change, break or disappear at any time.
+ * This struct is allocated as AVHWDeviceContext.hwctx
  */
+typedef struct AVQSVDeviceContext {
+    mfxSession session;
+} AVQSVDeviceContext;
 
-#endif /* SWSCALE_VERSION_MAJOR_H */
+/**
+ * This struct is allocated as AVHWFramesContext.hwctx
+ */
+typedef struct AVQSVFramesContext {
+    mfxFrameSurface1 *surfaces;
+    int            nb_surfaces;
+
+    /**
+     * A combination of MFX_MEMTYPE_* describing the frame pool.
+     */
+    int frame_type;
+} AVQSVFramesContext;
+
+#endif /* AVUTIL_HWCONTEXT_QSV_H */
+

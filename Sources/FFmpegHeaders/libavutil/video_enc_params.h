@@ -55,14 +55,6 @@ enum AVVideoEncParamsType {
      *   as AVVideoBlockParams.qp_delta.
      */
     AV_VIDEO_ENC_PARAMS_H264,
-
-    /*
-     * MPEG-2-compatible quantizer.
-     *
-     * Summing the frame-level qp with the per-block delta_qp gives the
-     * resulting quantizer for the block.
-     */
-    AV_VIDEO_ENC_PARAMS_MPEG2,
 };
 
 /**
@@ -136,8 +128,8 @@ typedef struct AVVideoBlockParams {
     int32_t delta_qp;
 } AVVideoBlockParams;
 
-/**
- * Get the block at the specified {@code idx}. Must be between 0 and nb_blocks - 1.
+/*
+ * Get the block at the specified {@code idx}. Must be between 0 and nb_blocks.
  */
 static av_always_inline AVVideoBlockParams*
 av_video_enc_params_block(AVVideoEncParams *par, unsigned int idx)
@@ -161,7 +153,7 @@ AVVideoEncParams *av_video_enc_params_alloc(enum AVVideoEncParamsType type,
 /**
  * Allocates memory for AVEncodeInfoFrame plus an array of
  * {@code nb_blocks} AVEncodeInfoBlock in the given AVFrame {@code frame}
- * as AVFrameSideData of type AV_FRAME_DATA_VIDEO_ENC_PARAMS
+ * as AVFrameSideData of type AV_FRAME_DATA_ENCODE_INFO
  * and initializes the variables.
  */
 AVVideoEncParams*

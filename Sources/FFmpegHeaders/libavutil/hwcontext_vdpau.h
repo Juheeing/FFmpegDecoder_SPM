@@ -1,6 +1,4 @@
 /*
- * Version macros.
- *
  * This file is part of FFmpeg.
  *
  * FFmpeg is free software; you can redistribute it and/or
@@ -18,23 +16,29 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef AVFILTER_VERSION_MAJOR_H
-#define AVFILTER_VERSION_MAJOR_H
+#ifndef AVUTIL_HWCONTEXT_VDPAU_H
+#define AVUTIL_HWCONTEXT_VDPAU_H
+
+#include <vdpau/vdpau.h>
 
 /**
  * @file
- * @ingroup lavfi
- * Libavfilter version macros
+ * An API-specific header for AV_HWDEVICE_TYPE_VDPAU.
+ *
+ * This API supports dynamic frame pools. AVHWFramesContext.pool must return
+ * AVBufferRefs whose data pointer is a VdpVideoSurface.
  */
-
-#define LIBAVFILTER_VERSION_MAJOR   9
 
 /**
- * FF_API_* defines may be placed below to indicate public API that will be
- * dropped at a future version bump. The defines themselves are not part of
- * the public API and may change, break or disappear at any time.
+ * This struct is allocated as AVHWDeviceContext.hwctx
+ */
+typedef struct AVVDPAUDeviceContext {
+    VdpDevice          device;
+    VdpGetProcAddress *get_proc_address;
+} AVVDPAUDeviceContext;
+
+/**
+ * AVHWFramesContext.hwctx is currently not used
  */
 
-#define FF_API_LIBPLACEBO_OPTS (LIBAVFILTER_VERSION_MAJOR < 10)
-
-#endif /* AVFILTER_VERSION_MAJOR_H */
+#endif /* AVUTIL_HWCONTEXT_VDPAU_H */
