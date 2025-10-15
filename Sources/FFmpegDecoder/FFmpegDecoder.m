@@ -187,32 +187,51 @@
     
     // 비디오 코덱 오픈
     if (vidx >= 0) {
-       pVStream = pFormatContext->streams[vidx];
-       pVPara = pVStream->codecpar;
-       pVCodec = (AVCodec*) avcodec_find_decoder(pVPara->codec_id);
-       pVCtx = avcodec_alloc_context3(pVCodec);
-       avcodec_parameters_to_context(pVCtx, pVPara);
-       avcodec_open2(pVCtx, pVCodec, NULL);
-       NSLog(@"FFmpeg## 비디오 코덱 : %d, %s(%s)\n", pVCodec->id, pVCodec->name, pVCodec->long_name);
+        pVStream = pFormatContext->streams[vidx];
+        pVPara = pVStream->codecpar;
+        NSLog(@"FFmpeg## 비디오 codec_id: %d (%s)", pVPara->codec_id, avcodec_get_name(pVPara->codec_id));
+        
+        pVCodec = (AVCodec*) avcodec_find_decoder(pVPara->codec_id);
+        if (!pVCodec) {
+            NSLog(@"FFmpeg## 비디오 코덱을 찾을 수 없습니다. codec_id = %d", pVPara->codec_id);
+            if (currentState != 7) {
+                [self sendCurrentState:7];
+            }
+            return;
+        } else {
+            pVCtx = avcodec_alloc_context3(pVCodec);
+            avcodec_parameters_to_context(pVCtx, pVPara);
+            avcodec_open2(pVCtx, pVCodec, NULL);
+            NSLog(@"FFmpeg## 비디오 코덱 : %d, %s(%s)\n",
+                  pVCodec->id,
+                  pVCodec->name,
+                  pVCodec->long_name ? pVCodec->long_name : "N/A");
+        }
     }
     // 오디오 코덱 오픈
     if (aidx >= 0) {
-       pAStream = pFormatContext->streams[aidx];
-       pAPara = pAStream->codecpar;
-       pACodec = (AVCodec*) avcodec_find_decoder(pAPara->codec_id);
-       pACtx = avcodec_alloc_context3(pACodec);
-       avcodec_parameters_to_context(pACtx, pAPara);
-       avcodec_open2(pACtx, pACodec, NULL);
-       NSLog(@"FFmpeg## 오디오 코덱 : %d, %s(%s)\n", pACodec->id, pACodec->name, pACodec->long_name);
-    }
-
-    if (pVCodec == NULL) {
-        NSLog(@"FFmpeg## No Video Decoder");
+        pAStream = pFormatContext->streams[aidx];
+        pAPara = pAStream->codecpar;
+        NSLog(@"FFmpeg## 오디오 codec_id: %d (%s)", pAPara->codec_id, avcodec_get_name(pAPara->codec_id));
+        
+        pACodec = (AVCodec*) avcodec_find_decoder(pAPara->codec_id);
+        if (!pACodec) {
+            NSLog(@"FFmpeg## 오디오 코덱을 찾을 수 없습니다. codec_id = %d", pAPara->codec_id);
+            if (currentState != 7) {
+                [self sendCurrentState:7];
+            }
+            return;
+        } else {
+            pACtx = avcodec_alloc_context3(pACodec);
+            avcodec_parameters_to_context(pACtx, pAPara);
+            avcodec_open2(pACtx, pACodec, NULL);
+            NSLog(@"FFmpeg## 오디오 코덱 : %d, %s(%s)\n",
+                  pACodec->id,
+                  pACodec->name,
+                  pACodec->long_name ? pACodec->long_name : "N/A");
+        }
     }
     
-    if (pACodec == NULL) {
-        NSLog(@"FFmpeg## No Audio Decoder");
-    }
     [self decoding];
 }
 
