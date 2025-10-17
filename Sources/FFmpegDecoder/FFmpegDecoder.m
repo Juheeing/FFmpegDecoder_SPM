@@ -359,13 +359,15 @@
 }
 
 - (int) readPlay {
-    
     int ret = -1;
-    
     @try {
         isPlaying = YES;
         ret = av_read_play(pFormatContext);
         NSLog(@"FFmpeg## av_read_play: %d", ret);
+
+        // pause → play 전환 시 pts 상태 초기화
+        lastRescaledPTS = -1;
+        
         if (currentState != 4) {
             [self sendCurrentState:4];
         }
@@ -375,10 +377,8 @@
             [self sendCurrentState:7];
         }
     }
-    
     return ret;
 }
-
 - (int) readPause {
     
     int ret = -1;
@@ -456,6 +456,7 @@
     if (raw_pts == AV_NOPTS_VALUE) {
         currentTime = (lastRescaledPTS != -1) ? (lastRescaledPTS + ptsOffset) : 0;
     } else {
+        // pts를 1초 단위로 변환
         int64_t rescaled_pts = av_rescale_q(raw_pts, stream->time_base, (AVRational){1, 1});
 
         if (hasPendingSeek) {
@@ -465,8 +466,13 @@
             hasPendingSeek = NO;
         } else {
             // 일반적인 discontinuity 처리
-            if (lastRescaledPTS != -1 && rescaled_pts < lastRescaledPTS) {
-                ptsOffset += lastRescaledPTS;
+            if (lastRescaledPTS != -1) {
+                int64_t diff = lastRescaledPTS - rescaled_pts;
+                // PTS가 1초 이상 역행할 경우에만 offset 조정
+                if (diff > 1000) {
+                    ptsOffset += lastRescaledPTS;
+                    NSLog(@"FFmpeg## PTS discontinuity detected, offset adjusted");
+                }
             }
             lastRescaledPTS = rescaled_pts;
         }
