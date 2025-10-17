@@ -449,27 +449,28 @@
 }
 
 - (void)getCurrentTime:(AVFrame *)frame stream:(AVStream *)stream {
+    static int64_t lastCurrentTime = 0; // 마지막 정상 currentTime 저장
+    
     int64_t currentTime = 0;
     int64_t totalDuration = pFormatContext->duration / AV_TIME_BASE;
 
     int64_t raw_pts = (frame->pts != AV_NOPTS_VALUE) ? frame->pts : frame->best_effort_timestamp;
     if (raw_pts == AV_NOPTS_VALUE) {
-        currentTime = (lastRescaledPTS != -1) ? (lastRescaledPTS + ptsOffset) : 0;
+        // PTS가 없을 경우 이전 시간 유지
+        currentTime = lastCurrentTime;
     } else {
-        // pts를 1초 단위로 변환
         int64_t rescaled_pts = av_rescale_q(raw_pts, stream->time_base, (AVRational){1, 1});
 
         if (hasPendingSeek) {
-            // seek 직후 첫 프레임: 요청한 초에 맞추기 위한 offset 계산
+            // seek 후 첫 프레임
             ptsOffset = (int64_t)pendingSeekSeconds - rescaled_pts;
             lastRescaledPTS = rescaled_pts;
             hasPendingSeek = NO;
         } else {
-            // 일반적인 discontinuity 처리
+            // 일반 PTS 처리
             if (lastRescaledPTS != -1) {
                 int64_t diff = lastRescaledPTS - rescaled_pts;
-                // PTS가 1초 이상 역행할 경우에만 offset 조정
-                if (diff > 1000) {
+                if (diff > 1000) { // 1초 이상 역행 시만 offset 보정
                     ptsOffset += lastRescaledPTS;
                     NSLog(@"FFmpeg## PTS discontinuity detected, offset adjusted");
                 }
@@ -478,6 +479,11 @@
         }
 
         currentTime = rescaled_pts + ptsOffset;
+    }
+
+    // 마지막 currentTime 저장 (0으로 돌아가지 않게)
+    if (currentTime > 0) {
+        lastCurrentTime = currentTime;
     }
 
     dispatch_sync(dispatch_get_main_queue(), ^{
