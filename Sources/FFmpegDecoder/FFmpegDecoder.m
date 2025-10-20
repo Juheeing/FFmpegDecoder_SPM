@@ -105,6 +105,10 @@
         [self->pauseCondition lock];
         self->isPaused = YES;
         [self->pauseCondition unlock];
+
+        if (self.player.isPlaying) {
+            [self.player pause]; // 오디오 멈춤
+        }
     });
 }
 
@@ -114,6 +118,10 @@
         self->isPaused = NO;
         [self->pauseCondition signal];
         [self->pauseCondition unlock];
+
+        if (!self.player.isPlaying) {
+            [self.player play]; // 오디오 재개
+        }
     });
 }
 
@@ -254,52 +262,50 @@
         if (currentState != 2) {
             [self sendCurrentState:2];
         }
-        while (!self->decodingStopped && [self readFrame:&packet] >= 0) {
-            [self->_delegate receivedVideoSize:outputFrameSize];
-            [self->pauseCondition lock];
-            while (!self->decodingStopped && self->isPaused) {
-                if (currentState != 5) {
-                    [self sendCurrentState:5];
-                }
-                [self readPause];
-                if (_player.isPlaying) {
-                    [_player pause];
-                }
-                if (self->isSeeking) {
-                    NSLog(@"FFmpeg## readSeek");
-                    self->isSeeking = NO;
-                    [self readSeek:seekTarget];
-                }
-                [self->pauseCondition wait];
+        [self->_delegate receivedVideoSize:outputFrameSize];
+        
+        int readResult = [self readFrame:&packet];
+        if (readResult < 0) break;
+        
+        [self->pauseCondition lock];
+        
+        while (!self->decodingStopped && self->isPaused) {
+            if (currentState != 5) {
+                [self sendCurrentState:5];
             }
-            [self->pauseCondition unlock];
-            
-            if (!self->isPlaying) {
-                [self readPlay];
-                if (currentState != 2) {
-                    [self sendCurrentState:2];
-                }
+            if (_player.isPlaying) {
+                [_player pause];
             }
-
-            if (packet.stream_index == vidx) {
-                if ([self sendPacket:pVCtx packet:&packet] >= 0) {
-                    int ret = [self receiveFrame:pVCtx frame:vFrame];
-                    if (ret >= 0) {
-                        [self getCurrentTime:vFrame stream:pVStream];
-                        [self drawImage];
-                    }
-                }
+            if (self->isSeeking) {
+                NSLog(@"FFmpeg## readSeek");
+                self->isSeeking = NO;
+                [self readSeek:seekTarget];
             }
-            if (packet.stream_index == aidx) {
-                if ([self sendPacket:pACtx packet:&packet] >= 0) {
-                    int ret = [self receiveFrame:pACtx frame:aFrame];
-                    if (ret >= 0) {
-                        [self drawAudio];
-                    }
-                }
-            }
-            av_packet_unref(&packet);
+            [self->pauseCondition wait];
         }
+        [self->pauseCondition unlock];
+        
+        if (self->decodingStopped) break;
+
+        if (packet.stream_index == vidx) {
+            if ([self sendPacket:pVCtx packet:&packet] >= 0) {
+                int ret = [self receiveFrame:pVCtx frame:vFrame];
+                if (ret >= 0) {
+                    [self getCurrentTime:vFrame stream:pVStream];
+                    [self drawImage];
+                }
+            }
+        }
+        if (packet.stream_index == aidx) {
+            if ([self sendPacket:pACtx packet:&packet] >= 0) {
+                int ret = [self receiveFrame:pACtx frame:aFrame];
+                if (ret >= 0) {
+                    [self drawAudio];
+                }
+            }
+        }
+        av_packet_unref(&packet);
+        
     }
     [self clear];
 }
