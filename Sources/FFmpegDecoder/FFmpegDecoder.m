@@ -18,9 +18,8 @@
     BOOL isPaused, isPlaying, isSeeking;
     double seekTarget;
     NSCondition *pauseCondition;
-    int64_t lastRescaledPTS_ms;      // 이전 프레임 pts (ms)
-    int64_t ptsOffset_ms;           // 누적 offset (ms)
-    int64_t lastCurrentTime_ms;     // 마지막 정상 current time (ms)
+    int64_t lastRescaledPTS;      // 이전 프레임 pts (rescaled)
+    int64_t ptsOffset;           // 누적 offset
     BOOL hasPendingSeek;         // seek 직후 첫 프레임에서 보정할 플래그
     double pendingSeekSeconds;   // 사용자가 요청한 seek 시간
     double currentBrightness, currentContrast;
@@ -45,9 +44,8 @@
         isPaused = NO;
         isSeeking = NO;
         isPlaying = YES;
-        lastRescaledPTS_ms = -1;
-        ptsOffset_ms = 0;
-        lastCurrentTime_ms = 0;
+        lastRescaledPTS = -1;
+        ptsOffset = 0;
         hasPendingSeek = NO;
         pendingSeekSeconds = 0;
         currentBrightness = 0.0;
@@ -367,7 +365,6 @@
     @try {
         isPlaying = YES;
         ret = av_read_play(pFormatContext);
-        lastRescaledPTS_ms = -1;
         NSLog(@"FFmpeg## av_read_play: %d", ret);
         if (currentState != 4) {
             [self sendCurrentState:4];
@@ -412,8 +409,8 @@
             return -1;
         }
 
-        lastRescaledPTS_ms = -1;
-        ptsOffset_ms = 0;
+        lastRescaledPTS = -1;
+        ptsOffset = 0;
         hasPendingSeek = YES;
         pendingSeekSeconds = seconds;
         
@@ -452,54 +449,33 @@
 }
 
 - (void)getCurrentTime:(AVFrame *)frame stream:(AVStream *)stream {
-    int64_t currentTime_ms = 0;
+    int64_t currentTime = 0;
     int64_t totalDuration = pFormatContext->duration / AV_TIME_BASE;
 
-    // 1) PTS 결정: pts가 유효하면 사용, 아니면 best_effort_timestamp 사용
     int64_t raw_pts = (frame->pts != AV_NOPTS_VALUE) ? frame->pts : frame->best_effort_timestamp;
-
     if (raw_pts == AV_NOPTS_VALUE) {
-        // 프레임에 PTS가 완전히 없을 경우: 이전 정상 시간 유지
-        currentTime_ms = self->lastCurrentTime_ms;
-        NSLog(@"FFmpeg## Frame has no PTS; keeping lastCurrentTime_ms=%lld", (long long)self->lastCurrentTime_ms);
+        currentTime = (lastRescaledPTS != -1) ? (lastRescaledPTS + ptsOffset) : 0;
     } else {
-        // 2) rescale to milliseconds for better precision
-        int64_t rescaled_ms = av_rescale_q(raw_pts, stream->time_base, (AVRational){1, 1000});
+        int64_t rescaled_pts = av_rescale_q(raw_pts, stream->time_base, (AVRational){1, 1});
 
-        if (self->hasPendingSeek) {
-            // seek 직후 첫 프레임: 요청한 초(pendingSeekSeconds)를 기준으로 offset(ms) 계산
-            int64_t requested_ms = (int64_t)(self->pendingSeekSeconds * 1000.0);
-            self->ptsOffset_ms = requested_ms - rescaled_ms;
-            self->lastRescaledPTS_ms = rescaled_ms;
-            self->hasPendingSeek = NO;
-            NSLog(@"FFmpeg## Seek correction applied: requested_ms=%lld rescaled_ms=%lld ptsOffset_ms=%lld",
-                  (long long)requested_ms, (long long)rescaled_ms, (long long)self->ptsOffset_ms);
+        if (hasPendingSeek) {
+            // seek 직후 첫 프레임: 요청한 초에 맞추기 위한 offset 계산
+            ptsOffset = (int64_t)pendingSeekSeconds - rescaled_pts;
+            lastRescaledPTS = rescaled_pts;
+            hasPendingSeek = NO;
         } else {
-            // 일반적인 discontinuity 처리: 역행이 '충분히 큰' 경우만 보정
-            if (self->lastRescaledPTS_ms != -1) {
-                int64_t diff_ms = self->lastRescaledPTS_ms - rescaled_ms; // positive이면 역행
-                // 2000 ms (2초) 이상의 역행만 offset 보정 — 작게 뒤로가는 건 무시
-                if (diff_ms > 2000) {
-                    self->ptsOffset_ms += self->lastRescaledPTS_ms;
-                    NSLog(@"FFmpeg## PTS discontinuity detected (diff %lld ms). ptsOffset_ms adjusted to %lld",
-                          (long long)diff_ms, (long long)self->ptsOffset_ms);
-                }
+            // 일반적인 discontinuity 처리
+            if (lastRescaledPTS != -1 && rescaled_pts < lastRescaledPTS) {
+                ptsOffset += lastRescaledPTS;
             }
-            self->lastRescaledPTS_ms = rescaled_ms;
+            lastRescaledPTS = rescaled_pts;
         }
 
-        // current time in ms
-        currentTime_ms = rescaled_ms + self->ptsOffset_ms;
+        currentTime = rescaled_pts + ptsOffset;
     }
 
-    // 마지막 정상 시간은 0보다 큰 경우에만 갱신 (0으로 리셋되는 걸 방지)
-    if (currentTime_ms > 0) {
-        self->lastCurrentTime_ms = currentTime_ms;
-    }
-
-    int64_t currentTime_sec = self->lastCurrentTime_ms / 1000; 
     dispatch_sync(dispatch_get_main_queue(), ^{
-        [self->_delegate receivedCurrentTime:currentTime_sec duration:totalDuration];
+        [self->_delegate receivedCurrentTime:currentTime duration:totalDuration];
     });
 }
 
