@@ -256,9 +256,6 @@
             [self->_delegate receivedVideoSize:outputFrameSize];
             [self->pauseCondition lock];
             while (!self->decodingStopped && self->isPaused) {
-                if (currentState != 5) {
-                    [self sendCurrentState:5];
-                }
                 [self readPause];
                 if (_player.isPlaying) {
                     [_player pause];
@@ -387,6 +384,9 @@
         isPlaying = NO;
         ret = av_read_pause(pFormatContext);
         NSLog(@"FFmpeg## av_read_pause: %d", ret);
+        if (currentState != 5) {
+            [self sendCurrentState:5];
+        }
     } @catch (NSException *exception) {
         NSLog(@"FFmpeg## av_read_pause error %@", exception);
         if (currentState != 7) {
