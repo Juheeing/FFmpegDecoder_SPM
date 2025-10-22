@@ -452,28 +452,51 @@
     int64_t currentTime = 0;
     int64_t totalDuration = pFormatContext->duration / AV_TIME_BASE;
 
+    // 현재 프레임의 PTS
     int64_t raw_pts = (frame->pts != AV_NOPTS_VALUE) ? frame->pts : frame->best_effort_timestamp;
+
     if (raw_pts == AV_NOPTS_VALUE) {
+        // PTS가 없는 경우 — 이전 값 기준으로 계산
         currentTime = (lastRescaledPTS != -1) ? (lastRescaledPTS + ptsOffset) : 0;
     } else {
+        // stream의 time_base → 초 단위로 변환
         int64_t rescaled_pts = av_rescale_q(raw_pts, stream->time_base, (AVRational){1, 1});
 
         if (hasPendingSeek) {
-            // seek 직후 첫 프레임: 요청한 초에 맞추기 위한 offset 계산
+            // ✅ Seek 직후 첫 프레임: offset 재설정
             ptsOffset = (int64_t)pendingSeekSeconds - rescaled_pts;
             lastRescaledPTS = rescaled_pts;
             hasPendingSeek = NO;
+            NSLog(@"FFmpeg## seek completed: rescaled_pts=%lld, offset=%lld", rescaled_pts, ptsOffset);
+
         } else {
-            // 일반적인 discontinuity 처리
-            if (lastRescaledPTS != -1 && rescaled_pts < lastRescaledPTS) {
-                ptsOffset += lastRescaledPTS;
+            // ✅ Pause/Resume 또는 Timestamp Jump 보정
+            if (lastRescaledPTS != -1) {
+                int64_t delta = rescaled_pts - lastRescaledPTS;
+
+                // 음수 PTS (역방향 jump)
+                if (delta < -AV_TIME_BASE) {
+                    ptsOffset += lastRescaledPTS;
+                    NSLog(@"FFmpeg## backward PTS discontinuity detected, adjusted offset=%lld", ptsOffset);
+                }
+
+                // ✅ resume 시 발생하는 비정상적인 forward jump 감지
+                else if (delta > 5 * AV_TIME_BASE) { // 5초 이상 jump면 비정상으로 간주
+                    ptsOffset -= delta;
+                    NSLog(@"FFmpeg## large PTS jump detected (%.2fs), offset corrected by %lld",
+                          (double)delta / AV_TIME_BASE, delta);
+                }
             }
+
+            // 최근 PTS 갱신
             lastRescaledPTS = rescaled_pts;
         }
 
+        // 최종 currentTime 계산
         currentTime = rescaled_pts + ptsOffset;
     }
 
+    // UI에 전송 (메인 스레드)
     dispatch_sync(dispatch_get_main_queue(), ^{
         [self->_delegate receivedCurrentTime:currentTime duration:totalDuration];
     });
