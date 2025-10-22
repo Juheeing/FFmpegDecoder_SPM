@@ -474,28 +474,33 @@
             if (lastRescaledPTS != -1) {
                 int64_t delta = rescaled_pts - lastRescaledPTS;
 
-                // 음수 PTS (역방향 jump)
-                if (delta < -AV_TIME_BASE) {
+                // ✅ RTP timestamp가 리셋된 경우 감지 (resume 후 currentTime=0 현상)
+                if (rescaled_pts < lastRescaledPTS / 2 && rescaled_pts < 10 * AV_TIME_BASE) {
+                    // RTP 세션이 리셋된 것으로 판단 → offset 재계산
+                    ptsOffset = (lastRescaledPTS + ptsOffset) - rescaled_pts;
+                    NSLog(@"FFmpeg## RTP timestamp reset detected, new offset=%lld", ptsOffset);
+                }
+
+                // ✅ 역방향 PTS jump
+                else if (delta < -AV_TIME_BASE) {
                     ptsOffset += lastRescaledPTS;
                     NSLog(@"FFmpeg## backward PTS discontinuity detected, adjusted offset=%lld", ptsOffset);
                 }
 
-                // ✅ resume 시 발생하는 비정상적인 forward jump 감지
-                else if (delta > 5 * AV_TIME_BASE) { // 5초 이상 jump면 비정상으로 간주
+                // ✅ pause-resume 시 비정상적 forward jump
+                else if (delta > 5 * AV_TIME_BASE) {
                     ptsOffset -= delta;
                     NSLog(@"FFmpeg## large PTS jump detected (%.2fs), offset corrected by %lld",
                           (double)delta / AV_TIME_BASE, delta);
                 }
             }
-
             // 최근 PTS 갱신
             lastRescaledPTS = rescaled_pts;
         }
-
         // 최종 currentTime 계산
         currentTime = rescaled_pts + ptsOffset;
     }
-
+    
     // UI에 전송 (메인 스레드)
     dispatch_sync(dispatch_get_main_queue(), ^{
         [self->_delegate receivedCurrentTime:currentTime duration:totalDuration];
