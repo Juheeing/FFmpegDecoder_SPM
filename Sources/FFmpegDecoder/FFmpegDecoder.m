@@ -25,6 +25,7 @@
     double currentBrightness, currentContrast;
     int currentState;
     float prevContrast, prevBrightness;
+    volatile int abort_request;
 }
 
 + (instancetype)sharedInstance {
@@ -34,6 +35,12 @@
         sharedInstance = [[FFmpegDecoder alloc] init];
     });
     return sharedInstance;
+}
+
+static int ff_interrupt_callback(void *opaque) {
+    // opaque가 self이면 멤버 abort_request 체크
+    FFmpegDecoder *self = (__bridge FFmpegDecoder *)opaque;
+    return self->abort_request; // 0 -> 계속, 1 -> 인터럽트(블로킹 종료)
 }
 
 - (id) init {
@@ -85,9 +92,7 @@
 
 - (void)stopDecoding {
     NSLog(@"FFmpeg## stopDecoding");
-    if (currentState != 0) {
-        [self sendCurrentState:0];
-    }
+    if (currentState != 0) { [self sendCurrentState:0]; }
     [self->pauseCondition lock];
     self->decodingStopped = YES;
     [self->pauseCondition signal];
@@ -100,6 +105,7 @@
 
 - (void)pause {
     dispatch_async(mDecodingQueue, ^{
+        self->abort_request = 1;
         [self->pauseCondition lock];
         self->isPaused = YES;
         [self->pauseCondition unlock];
@@ -108,6 +114,7 @@
 
 - (void)resume {
     dispatch_async(mDecodingQueue, ^{
+        self->abort_request = 0;
         [self->pauseCondition lock];
         self->isPaused = NO;
         [self->pauseCondition signal];
@@ -142,12 +149,13 @@
 - (void)openFile:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options {
     NSLog(@"FFmpeg## openFile: %@", url);
     
-    if (currentState != 0) {
-        [self sendCurrentState:0];
-    }
+    if (currentState != 0) { [self sendCurrentState:0]; }
     av_log_set_level(AV_LOG_DEBUG);
     avformat_network_init();
     pFormatContext = avformat_alloc_context();
+    
+    pFormatContext->interrupt_callback.callback = ff_interrupt_callback;
+    pFormatContext->interrupt_callback.opaque = (__bridge void *)self;
     
     AVDictionary *opts = 0;
     
@@ -164,9 +172,7 @@
     if (ret != 0) {
         NSLog(@"FFmpeg## File Open Failed");
         [self stopDecoding];
-        if (currentState != 7) {
-            [self sendCurrentState:7];
-        }
+        if (currentState != 7) { [self sendCurrentState:7]; }
         return;
     }
     
@@ -194,9 +200,7 @@
         pVCodec = (AVCodec*) avcodec_find_decoder(pVPara->codec_id);
         if (!pVCodec) {
             NSLog(@"FFmpeg## 비디오 코덱을 찾을 수 없습니다. codec_id = %d", pVPara->codec_id);
-            if (currentState != 7) {
-                [self sendCurrentState:7];
-            }
+            if (currentState != 7) { [self sendCurrentState:7]; }
             return;
         } else {
             pVCtx = avcodec_alloc_context3(pVCodec);
@@ -217,9 +221,7 @@
         pACodec = (AVCodec*) avcodec_find_decoder(pAPara->codec_id);
         if (!pACodec) {
             NSLog(@"FFmpeg## 오디오 코덱을 찾을 수 없습니다. codec_id = %d", pAPara->codec_id);
-            if (currentState != 7) {
-                [self sendCurrentState:7];
-            }
+            if (currentState != 7) { [self sendCurrentState:7]; }
             return;
         } else {
             pACtx = avcodec_alloc_context3(pACodec);
@@ -238,9 +240,7 @@
 //파일로부터 인코딩 된 비디오, 오디오 데이터를 읽어서 packet에 저장하는 함수
 - (void) decoding {
     
-    if (currentState != 1) {
-        [self sendCurrentState:1];
-    }
+    if (currentState != 1) { [self sendCurrentState:1]; }
     vFrame = av_frame_alloc();
     aFrame = av_frame_alloc();
     packet = *av_packet_alloc();
@@ -249,14 +249,20 @@
     NSLog(@"FFmpeg## Video Resolution: %.0f x %.0f", outputFrameSize.width, outputFrameSize.height);
         
     while (!self->decodingStopped && pFormatContext != NULL) {
-        if (currentState != 2) {
-            [self sendCurrentState:2];
-        }
+        
+        if (currentState != 2) { [self sendCurrentState:2]; }
+        
         while (!self->decodingStopped && [self readFrame:&packet] >= 0) {
+            
             [self->_delegate receivedVideoSize:outputFrameSize];
+            
             [self->pauseCondition lock];
+            
             while (!self->decodingStopped && self->isPaused) {
-                [self readPause];
+                int rp = [self readPause];
+                if (rp < 0) {
+                    NSLog(@"FFmpeg## readPause returned %d, interrupting/handling", rp);
+                }
                 if (_player.isPlaying) {
                     [_player pause];
                 }
@@ -271,9 +277,7 @@
             
             if (!self->isPlaying) {
                 [self readPlay];
-                if (currentState != 2) {
-                    [self sendCurrentState:2];
-                }
+                if (currentState != 2) { [self sendCurrentState:2]; }
             }
 
             if (packet.stream_index == vidx) {
@@ -309,15 +313,11 @@
             if (ret == AVERROR_EOF) {
                 NSLog(@"FFmpeg## readFrame EOF");
                 [self stopDecoding];
-                if (currentState != 6) {
-                    [self sendCurrentState:6];
-                }
+                if (currentState != 6) { [self sendCurrentState:6]; }
             }
         } @catch (NSException *exception) {
             NSLog(@"FFmpeg## av_read_frame error: %@", exception);
-            if (currentState != 7) {
-                [self sendCurrentState:7];
-            }
+            if (currentState != 7) { [self sendCurrentState:7]; }
         }
     }
     return ret;
@@ -331,9 +331,7 @@
             ret = avcodec_send_packet(ctx, packet);
         } @catch (NSException *exception) {
             NSLog(@"FFmpeg## avcodec_send_packet error");
-            if (currentState != 7) {
-                [self sendCurrentState:7];
-            }
+            if (currentState != 7) { [self sendCurrentState:7]; }
         }
     }
     return ret;
@@ -347,9 +345,7 @@
             ret = avcodec_receive_frame(ctx, frame);
         } @catch (NSException *exception) {
             NSLog(@"FFmpeg## avcodec_receive_frame error");
-            if (currentState != 7) {
-                [self sendCurrentState:7];
-            }
+            if (currentState != 7) { [self sendCurrentState:7]; }
         }
     }
     return ret;
@@ -362,15 +358,15 @@
     @try {
         isPlaying = YES;
         ret = av_read_play(pFormatContext);
-        NSLog(@"FFmpeg## av_read_play: %d", ret);
-        if (currentState != 4) {
-            [self sendCurrentState:4];
+        if (ret < 0) {
+            NSLog(@"FFmpeg## av_read_play error %d, errno? [%d]", ret, errno);
+        } else {
+            NSLog(@"FFmpeg## av_read_play: %d", ret);
+            if (currentState != 4) { [self sendCurrentState:4]; }
         }
     } @catch (NSException *exception) {
         NSLog(@"FFmpeg## av_read_play error %@", exception);
-        if (currentState != 7) {
-            [self sendCurrentState:7];
-        }
+        if (currentState != 7) { [self sendCurrentState:7]; }
     }
     
     return ret;
@@ -383,15 +379,15 @@
     @try {
         isPlaying = NO;
         ret = av_read_pause(pFormatContext);
-        NSLog(@"FFmpeg## av_read_pause: %d", ret);
-        if (currentState != 5) {
-            [self sendCurrentState:5];
+        if (ret < 0) {
+            NSLog(@"FFmpeg## av_read_pause error %d, errno? [%d]", ret, errno);
+        } else {
+            NSLog(@"FFmpeg## av_read_pause: %d", ret);
+            if (currentState != 5) { [self sendCurrentState:5]; }
         }
     } @catch (NSException *exception) {
         NSLog(@"FFmpeg## av_read_pause error %@", exception);
-        if (currentState != 7) {
-            [self sendCurrentState:7];
-        }
+        if (currentState != 7) { [self sendCurrentState:7]; }
     }
     
     return ret;
@@ -403,9 +399,7 @@
     @try {
         if (seconds < 0 || !pFormatContext) {
             NSLog(@"FFmpeg## Invalid seek time or context is NULL");
-            if (currentState != 7) {
-                [self sendCurrentState:7];
-            }
+            if (currentState != 7) { [self sendCurrentState:7]; }
             return -1;
         }
 
@@ -427,9 +421,7 @@
 
         if (ret < 0) {
             NSLog(@"FFmpeg## Seek failed");
-            if (currentState != 7) {
-                [self sendCurrentState:7];
-            }
+            if (currentState != 7) { [self sendCurrentState:7]; }
             hasPendingSeek = NO;
         } else {
             dispatch_sync(dispatch_get_main_queue(), ^{
@@ -438,9 +430,7 @@
         }
     } @catch (NSException *exception) {
         NSLog(@"FFmpeg## av_seek_frame exception: %@", exception);
-        if (currentState != 7) {
-            [self sendCurrentState:7];
-        }
+        if (currentState != 7) { [self sendCurrentState:7]; }
         ret = -1;
         hasPendingSeek = NO;
     }
