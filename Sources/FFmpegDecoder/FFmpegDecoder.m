@@ -99,9 +99,18 @@
 }
 
 - (void)pause {
+    // pause 요청을 decoding 스레드에서 처리 -> av_read_pause를 같은 스레드에서 실행
     dispatch_async(mDecodingQueue, ^{
         [self->pauseCondition lock];
         self->isPaused = YES;
+        if (self->pFormatContext) {
+            // av_read_pause 호출 (wrapper 내부에서 state 전송)
+            [self readPause];
+        }
+        // 오디오 플레이어는 즉시 멈추게 하자
+        if (self.player.isPlaying) {
+            [self.player pause];
+        }
         [self->pauseCondition unlock];
     });
 }
@@ -110,6 +119,10 @@
     dispatch_async(mDecodingQueue, ^{
         [self->pauseCondition lock];
         self->isPaused = NO;
+        if (self->pFormatContext) {
+            [self readPlay];
+        }
+        // signal을 줘서 decoding 루프가 다시 진행되도록 함
         [self->pauseCondition signal];
         [self->pauseCondition unlock];
     });
@@ -236,89 +249,104 @@
 }
 
 //파일로부터 인코딩 된 비디오, 오디오 데이터를 읽어서 packet에 저장하는 함수
-- (void) decoding {
-    
+- (void)decoding {
     if (currentState != 1) {
         [self sendCurrentState:1];
     }
     vFrame = av_frame_alloc();
     aFrame = av_frame_alloc();
     packet = *av_packet_alloc();
-    
-    outputFrameSize = CGSizeMake(self->pVCtx->width, self->pVCtx->height);
-    NSLog(@"FFmpeg## Video Resolution: %.0f x %.0f", outputFrameSize.width, outputFrameSize.height);
-        
-    while (!self->decodingStopped && pFormatContext != NULL) {
+
+    if (pVCtx) {
+        outputFrameSize = CGSizeMake(pVCtx->width, pVCtx->height);
+        NSLog(@"FFmpeg## Video Resolution: %.0f x %.0f", outputFrameSize.width, outputFrameSize.height);
+    } else {
+        outputFrameSize = CGSizeZero;
+    }
+
+    while (!decodingStopped && pFormatContext != NULL) {
         if (currentState != 2) {
             [self sendCurrentState:2];
         }
-        while (!self->decodingStopped && [self readFrame:&packet] >= 0) {
-            [self->_delegate receivedVideoSize:outputFrameSize];
-            [self->pauseCondition lock];
-            while (!self->decodingStopped && self->isPaused) {
-                [self readPause];
-                if (_player.isPlaying) {
-                    [_player pause];
-                }
-                if (self->isSeeking) {
-                    NSLog(@"FFmpeg## readSeek");
-                    self->isSeeking = NO;
-                    [self readSeek:seekTarget];
-                }
-                [self->pauseCondition wait];
-            }
-            [self->pauseCondition unlock];
-            
-            if (!self->isPlaying) {
-                [self readPlay];
-                if (currentState != 2) {
-                    [self sendCurrentState:2];
-                }
-            }
 
-            if (packet.stream_index == vidx) {
-                if ([self sendPacket:pVCtx packet:&packet] >= 0) {
-                    int ret = [self receiveFrame:pVCtx frame:vFrame];
-                    if (ret >= 0) {
-                        [self getCurrentTime:vFrame stream:pVStream];
-                        [self drawImage];
-                    }
-                }
+        // ----------------------------
+        // Pause 처리: av_read_frame 호출 전에 검사
+        // ----------------------------
+        [pauseCondition lock];
+        while (!decodingStopped && isPaused) {
+            // audio player도 일시정지
+            if (self.player.isPlaying) {
+                [self.player pause];
             }
-            if (packet.stream_index == aidx) {
-                if ([self sendPacket:pACtx packet:&packet] >= 0) {
-                    int ret = [self receiveFrame:pACtx frame:aFrame];
-                    if (ret >= 0) {
-                        [self drawAudio];
-                    }
-                }
-            }
-            av_packet_unref(&packet);
+            // 대기: resume 시 signal로 깨어남
+            [pauseCondition wait];
         }
+        // 만약 seek 요청이 들어왔으면 여기에 처리
+        if (!decodingStopped && isSeeking) {
+            double sec = seekTarget;
+            isSeeking = NO;
+            [pauseCondition unlock];
+            [self readSeek:sec];
+            // seek 후 루프 상단으로 되돌아가 다시 읽기
+            continue;
+        }
+        [pauseCondition unlock];
+
+        // 안전하게 readFrame 시도
+        int r = [self readFrame:&packet];
+        if (r < 0) {
+            // 에러 또는 EOF시 잠시 대기하거나 루프 계속
+            // EOF는 readFrame 내부에서 stopDecoding 처리함
+            continue;
+        }
+
+        // 비디오 패킷 처리
+        if (packet.stream_index == vidx) {
+            if ([self sendPacket:pVCtx packet:&packet] >= 0) {
+                int ret = [self receiveFrame:pVCtx frame:vFrame];
+                if (ret >= 0) {
+                    [self getCurrentTime:vFrame stream:pVStream];
+                    [self drawImage];
+                }
+            }
+        }
+
+        // 오디오 패킷 처리
+        if (packet.stream_index == aidx) {
+            if ([self sendPacket:pACtx packet:&packet] >= 0) {
+                int ret = [self receiveFrame:pACtx frame:aFrame];
+                if (ret >= 0) {
+                    [self drawAudio];
+                }
+            }
+        }
+
+        av_packet_unref(&packet);
     }
+
     [self clear];
 }
 
 - (int) readFrame:(AVPacket *)packet {
-
     int ret = -1;
-    if (pFormatContext != NULL) {
-        @try {
-            ret = av_read_frame(pFormatContext, packet);
-            
-            if (ret == AVERROR_EOF) {
-                NSLog(@"FFmpeg## readFrame EOF");
-                [self stopDecoding];
-                if (currentState != 6) {
-                    [self sendCurrentState:6];
-                }
-            }
-        } @catch (NSException *exception) {
-            NSLog(@"FFmpeg## av_read_frame error: %@", exception);
-            if (currentState != 7) {
-                [self sendCurrentState:7];
-            }
+    if (!pFormatContext) return -1;
+    @try {
+        ret = av_read_frame(pFormatContext, packet);
+        if (ret == AVERROR_EOF) {
+            NSLog(@"FFmpeg## readFrame EOF");
+            [self stopDecoding];
+            if (currentState != 6) { [self sendCurrentState:6]; }
+        } else if (ret < 0) {
+            // 읽기 실패: 에러 코드를 로그에 남김
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            NSLog(@"FFmpeg## av_read_frame error: %s", errbuf);
+            // 잠깐 대기 후 재시도(네트워크 일시적 장애 대비)
+            // usleep(10000); // 필요하면 활성화
         }
+    } @catch (NSException *exception) {
+        NSLog(@"FFmpeg## av_read_frame exception: %@", exception);
+        if (currentState != 7) { [self sendCurrentState:7]; }
     }
     return ret;
 }
