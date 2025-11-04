@@ -360,6 +360,7 @@ static int ff_interrupt_callback(void *opaque) {
         ret = av_read_play(pFormatContext);
         if (ret < 0) {
             NSLog(@"FFmpeg## av_read_play error %d, errno? [%d]", ret, errno);
+            if (currentState != 7) { [self sendCurrentState:7]; }
         } else {
             NSLog(@"FFmpeg## av_read_play: %d", ret);
             if (currentState != 4) { [self sendCurrentState:4]; }
@@ -381,6 +382,7 @@ static int ff_interrupt_callback(void *opaque) {
         ret = av_read_pause(pFormatContext);
         if (ret < 0) {
             NSLog(@"FFmpeg## av_read_pause error %d, errno? [%d]", ret, errno);
+            if (currentState != 7) { [self sendCurrentState:7]; }
         } else {
             NSLog(@"FFmpeg## av_read_pause: %d", ret);
             if (currentState != 5) { [self sendCurrentState:5]; }
