@@ -426,61 +426,71 @@
 }
 
 - (void)getCurrentTime:(AVFrame *)frame stream:(AVStream *)stream {
-    int64_t currentTime = 0;
-    int64_t totalDuration = pFormatContext->duration / AV_TIME_BASE;
+    double currentTimeSec = 0.0;
+    double totalDurationSec = 0.0;
+    if (pFormatContext && pFormatContext->duration > 0) {
+        totalDurationSec = (double)pFormatContext->duration / AV_TIME_BASE; // seconds
+    }
 
-    // 현재 프레임의 PTS
     int64_t raw_pts = (frame->pts != AV_NOPTS_VALUE) ? frame->pts : frame->best_effort_timestamp;
 
     if (raw_pts == AV_NOPTS_VALUE) {
         // PTS가 없는 경우 — 이전 값 기준으로 계산
-        currentTime = (lastRescaledPTS != -1) ? (lastRescaledPTS + ptsOffset) : 0;
+        if (lastRescaledPTS != -1) {
+            // lastRescaledPTS를 seconds로 유지하자 (double 저장 필요)
+            currentTimeSec = lastRescaledPTS + ptsOffset;
+        } else {
+            currentTimeSec = 0.0;
+        }
     } else {
-        // stream의 time_base → 초 단위로 변환
-        int64_t rescaled_pts = av_rescale_q(raw_pts, stream->time_base, (AVRational){1, 1});
+        // stream->time_base 를 초 단위로 변환
+        double tb = av_q2d(stream->time_base);
+        double rescaled_pts_sec = raw_pts * tb; // seconds
 
         if (hasPendingSeek) {
-            // ✅ Seek 직후 첫 프레임: offset 재설정
-            ptsOffset = (int64_t)pendingSeekSeconds - rescaled_pts;
-            lastRescaledPTS = rescaled_pts;
+            // Seek 직후: pendingSeekSeconds는 이미 초 단위라고 가정
+            // ptsOffsetSec: 초 단위 오프셋
+            ptsOffset = pendingSeekSeconds - rescaled_pts_sec;
+            lastRescaledPTS = rescaled_pts_sec;
             hasPendingSeek = NO;
-            NSLog(@"FFmpeg## seek completed: rescaled_pts=%lld, offset=%lld", rescaled_pts, ptsOffset);
-
+            NSLog(@"FFmpeg## seek completed: rescaled_pts_sec=%.6f, offsetSec=%.6lld", rescaled_pts_sec, ptsOffset);
         } else {
-            // ✅ Pause/Resume 또는 Timestamp Jump 보정
             if (lastRescaledPTS != -1) {
-                int64_t delta = rescaled_pts - lastRescaledPTS;
+                double deltaSec = rescaled_pts_sec - lastRescaledPTS;
 
-                // ✅ RTP timestamp가 리셋된 경우 감지 (resume 후 currentTime=0 현상)
-                if (rescaled_pts < lastRescaledPTS / 2 && rescaled_pts < 10 * AV_TIME_BASE) {
+                // --- RTP timestamp 리셋 감지 ---
+                // 예: rescaled_pts가 이전보다 매우 작아졌거나 (절반 이하) 매우 작을 때
+                if (rescaled_pts_sec < lastRescaledPTS * 0.5 && rescaled_pts_sec < 10.0) {
                     // RTP 세션이 리셋된 것으로 판단 → offset 재계산
-                    ptsOffset = (lastRescaledPTS + ptsOffset) - rescaled_pts;
-                    NSLog(@"FFmpeg## RTP timestamp reset detected, new offset=%lld", ptsOffset);
+                    ptsOffset = (lastRescaledPTS + ptsOffset) - rescaled_pts_sec;
+                    NSLog(@"FFmpeg## RTP timestamp reset detected, new offsetSec=%.6lld", ptsOffset);
                 }
-
-                // ✅ 역방향 PTS jump
-                else if (delta < -AV_TIME_BASE) {
+                // 역방향 PTS jump (큰 음수 델타)
+                else if (deltaSec < -1.0) { // 1초보다 크게 뒤로 이동하면
                     ptsOffset += lastRescaledPTS;
-                    NSLog(@"FFmpeg## backward PTS discontinuity detected, adjusted offset=%lld", ptsOffset);
+                    NSLog(@"FFmpeg## backward PTS discontinuity detected, adjusted offsetSec=%.6lld", ptsOffset);
                 }
-
-                // ✅ pause-resume 시 비정상적 forward jump
-                else if (delta > 5 * AV_TIME_BASE) {
-                    ptsOffset -= delta;
-                    NSLog(@"FFmpeg## large PTS jump detected (%.2fs), offset corrected by %lld",
-                          (double)delta / AV_TIME_BASE, delta);
+                // pause-resume 시 비정상적 forward jump
+                else if (deltaSec > 5.0) { // 5초 이상의 큰 점프
+                    ptsOffset -= deltaSec;
+                    NSLog(@"FFmpeg## large PTS jump detected (%.3fs), offset corrected by %.6f",
+                          deltaSec, deltaSec);
                 }
+                // (기타: 아주 작은 잡음은 무시)
             }
-            // 최근 PTS 갱신
-            lastRescaledPTS = rescaled_pts;
+            lastRescaledPTS = rescaled_pts_sec;
         }
-        // 최종 currentTime 계산
-        currentTime = rescaled_pts + ptsOffset;
+        currentTimeSec = rescaled_pts_sec + ptsOffset;
     }
-    
-    // UI에 전송 (메인 스레드)
+
+    // 메인 스레드로 보낼 때 정수(초) 혹은 마이크로초로 변환해서 보낼지 결정
+    // delegate가 기대하는 단위를 맞추기
     dispatch_sync(dispatch_get_main_queue(), ^{
-        [self->_delegate receivedCurrentTime:currentTime duration:totalDuration];
+        // 여기서는 seconds를 정수 밀리/마이크로초로 바꿔서 보낼 필요가 있으면 변환
+        // 예: receivedCurrentTime는 초를 int64로 받는다면 * AV_TIME_BASE로 바꿔서 보낸다.
+        int64_t sendCurrentTime = (int64_t)(currentTimeSec * AV_TIME_BASE); // 마이크로초 단위
+        int64_t sendDuration = (int64_t)(totalDurationSec * AV_TIME_BASE);
+        [self->_delegate receivedCurrentTime:sendCurrentTime duration:sendDuration];
     });
 }
 
