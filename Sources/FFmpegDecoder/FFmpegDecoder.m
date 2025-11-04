@@ -25,7 +25,6 @@
     double currentBrightness, currentContrast;
     int currentState;
     float prevContrast, prevBrightness;
-    volatile int abort_request;
 }
 
 + (instancetype)sharedInstance {
@@ -35,12 +34,6 @@
         sharedInstance = [[FFmpegDecoder alloc] init];
     });
     return sharedInstance;
-}
-
-static int ff_interrupt_callback(void *opaque) {
-    // opaque가 self이면 멤버 abort_request 체크
-    FFmpegDecoder *self = (__bridge FFmpegDecoder *)opaque;
-    return self->abort_request; // 0 -> 계속, 1 -> 인터럽트(블로킹 종료)
 }
 
 - (id) init {
@@ -105,7 +98,6 @@ static int ff_interrupt_callback(void *opaque) {
 
 - (void)pause {
     dispatch_async(mDecodingQueue, ^{
-        self->abort_request = 1;
         [self->pauseCondition lock];
         self->isPaused = YES;
         [self->pauseCondition unlock];
@@ -114,7 +106,6 @@ static int ff_interrupt_callback(void *opaque) {
 
 - (void)resume {
     dispatch_async(mDecodingQueue, ^{
-        self->abort_request = 0;
         [self->pauseCondition lock];
         self->isPaused = NO;
         [self->pauseCondition signal];
@@ -153,9 +144,6 @@ static int ff_interrupt_callback(void *opaque) {
     av_log_set_level(AV_LOG_DEBUG);
     avformat_network_init();
     pFormatContext = avformat_alloc_context();
-    
-    pFormatContext->interrupt_callback.callback = ff_interrupt_callback;
-    pFormatContext->interrupt_callback.opaque = (__bridge void *)self;
     
     AVDictionary *opts = 0;
     
@@ -259,10 +247,7 @@ static int ff_interrupt_callback(void *opaque) {
             [self->pauseCondition lock];
             
             while (!self->decodingStopped && self->isPaused) {
-                int rp = [self readPause];
-                if (rp < 0) {
-                    NSLog(@"FFmpeg## readPause returned %d, interrupting/handling", rp);
-                }
+                [self readPause];
                 if (_player.isPlaying) {
                     [_player pause];
                 }
