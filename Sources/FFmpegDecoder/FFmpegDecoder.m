@@ -101,12 +101,18 @@
 - (void)pause {
     dispatch_async(mDecodingQueue, ^{
         [self->pauseCondition lock];
+        if (self->isPaused) {
+            [self->pauseCondition unlock];
+            return;
+        }
         self->isPaused = YES;
 
+        // stop audio output (pause node)
+        [self->_player pause];
+        
         if (self->currentState != 5) {
             [self sendCurrentState:5];
         }
-
         [self->pauseCondition unlock];
     });
 }
@@ -114,13 +120,20 @@
 - (void)resume {
     dispatch_async(mDecodingQueue, ^{
         [self->pauseCondition lock];
+        if (!self->isPaused) {
+            [self->pauseCondition unlock];
+            return;
+        }
         self->isPaused = NO;
+
+        [self->_player play];
+        
+        // wake decoding loop
         [self->pauseCondition signal];
 
         if (self->currentState != 4) {
             [self sendCurrentState:4];
         }
-
         [self->pauseCondition unlock];
     });
 }
@@ -247,60 +260,80 @@
 
 //파일로부터 인코딩 된 비디오, 오디오 데이터를 읽어서 packet에 저장하는 함수
 - (void) decoding {
-    
     if (currentState != 1) {
         [self sendCurrentState:1];
     }
+
     vFrame = av_frame_alloc();
     aFrame = av_frame_alloc();
     packet = *av_packet_alloc();
-    
-    outputFrameSize = CGSizeMake(self->pVCtx->width, self->pVCtx->height);
-    NSLog(@"FFmpeg## Video Resolution: %.0f x %.0f", outputFrameSize.width, outputFrameSize.height);
-        
-    while (!self->decodingStopped && pFormatContext != NULL) {
-        if (currentState != 2) {
-            [self sendCurrentState:2];
-        }
-        while (!self->decodingStopped && [self readFrame:&packet] >= 0) {
-            [self->_delegate receivedVideoSize:outputFrameSize];
-            
-            [self->pauseCondition lock];
-            while (!self->decodingStopped && self->isPaused) {
-                
-                if (_player.isPlaying) {
-                    [_player pause];
-                }
-                
-                if (self->isSeeking) {
-                    NSLog(@"FFmpeg## readSeek");
-                    self->isSeeking = NO;
-                    [self readSeek:seekTarget];
-                }
-                [self->pauseCondition wait];
-            }
-            [self->pauseCondition unlock];
 
-            if (packet.stream_index == vidx) {
-                if ([self sendPacket:pVCtx packet:&packet] >= 0) {
-                    int ret = [self receiveFrame:pVCtx frame:vFrame];
-                    if (ret >= 0) {
-                        [self getCurrentTime:vFrame stream:pVStream];
-                        [self drawImage];
-                    }
-                }
-            }
-            if (packet.stream_index == aidx) {
-                if ([self sendPacket:pACtx packet:&packet] >= 0) {
-                    int ret = [self receiveFrame:pACtx frame:aFrame];
-                    if (ret >= 0) {
-                        [self drawAudio];
-                    }
-                }
-            }
-            av_packet_unref(&packet);
-        }
+    if (pVCtx) {
+        outputFrameSize = CGSizeMake(pVCtx->width, pVCtx->height);
+        NSLog(@"FFmpeg## Video Resolution: %.0f x %.0f", outputFrameSize.width, outputFrameSize.height);
     }
+
+    decodingStopped = NO;
+
+    while (!decodingStopped && pFormatContext != NULL) {
+
+        // --- Pause handling: readFrame 호출 전에 검사해서 pause일 때는 읽지 않음 ---
+        [pauseCondition lock];
+        while (!decodingStopped && isPaused) {
+            // audio already paused in pause()
+            [pauseCondition wait];
+        }
+        [pauseCondition unlock];
+
+        if (decodingStopped || pFormatContext == NULL) break;
+
+        // read a packet only when not paused
+        int rf = [self readFrame:&packet];
+        if (rf < 0) {
+            // error or EOF; small sleep to avoid busy loop if necessary
+            // usleep(1000);
+            continue;
+        }
+
+        // If seeking flagged, handle seek BEFORE processing packet
+        if (isSeeking) {
+            // perform actual seek operation
+            [self readSeek:seekTarget];
+            // clear any decoded frames in codecs
+            avcodec_flush_buffers(pVCtx);
+            avcodec_flush_buffers(pACtx);
+            // drop the packet we just read since timestamp might be inconsistent
+            av_packet_unref(&packet);
+            self->isSeeking = NO;
+            continue;
+        }
+
+        // notify UI about video size (if needed)
+        if (packet.stream_index == vidx) {
+            [self->_delegate receivedVideoSize:outputFrameSize];
+        }
+
+        // Packet dispatch to decoders
+        if (packet.stream_index == vidx && pVCtx) {
+            if ([self sendPacket:pVCtx packet:&packet] >= 0) {
+                int ret = [self receiveFrame:pVCtx frame:vFrame];
+                if (ret >= 0) {
+                    [self getCurrentTime:vFrame stream:pVStream];
+                    [self drawImage];
+                }
+            }
+        } else if (packet.stream_index == aidx && pACtx) {
+            if ([self sendPacket:pACtx packet:&packet] >= 0) {
+                int ret = [self receiveFrame:pACtx frame:aFrame];
+                if (ret >= 0) {
+                    [self drawAudio];
+                }
+            }
+        }
+
+        av_packet_unref(&packet);
+    }
+
     [self clear];
 }
 
@@ -357,48 +390,6 @@
             }
         }
     }
-    return ret;
-}
-
-- (int) readPlay {
-    
-    int ret = -1;
-    
-    @try {
-        isPlaying = YES;
-        ret = av_read_play(pFormatContext);
-        NSLog(@"FFmpeg## av_read_play: %d", ret);
-        if (currentState != 4) {
-            [self sendCurrentState:4];
-        }
-    } @catch (NSException *exception) {
-        NSLog(@"FFmpeg## av_read_play error %@", exception);
-        if (currentState != 7) {
-            [self sendCurrentState:7];
-        }
-    }
-    
-    return ret;
-}
-
-- (int) readPause {
-    
-    int ret = -1;
-    
-    @try {
-        isPlaying = NO;
-        ret = av_read_pause(pFormatContext);
-        NSLog(@"FFmpeg## av_read_pause: %d", ret);
-        if (currentState != 5) {
-            [self sendCurrentState:5];
-        }
-    } @catch (NSException *exception) {
-        NSLog(@"FFmpeg## av_read_pause error %@", exception);
-        if (currentState != 7) {
-            [self sendCurrentState:7];
-        }
-    }
-    
     return ret;
 }
 
