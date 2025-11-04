@@ -99,18 +99,14 @@
 }
 
 - (void)pause {
-    // pause 요청을 decoding 스레드에서 처리 -> av_read_pause를 같은 스레드에서 실행
     dispatch_async(mDecodingQueue, ^{
         [self->pauseCondition lock];
         self->isPaused = YES;
-        if (self->pFormatContext) {
-            // av_read_pause 호출 (wrapper 내부에서 state 전송)
-            [self readPause];
+
+        if (self->currentState != 5) {
+            [self sendCurrentState:5];
         }
-        // 오디오 플레이어는 즉시 멈추게 하자
-        if (self.player.isPlaying) {
-            [self.player pause];
-        }
+
         [self->pauseCondition unlock];
     });
 }
@@ -119,11 +115,12 @@
     dispatch_async(mDecodingQueue, ^{
         [self->pauseCondition lock];
         self->isPaused = NO;
-        if (self->pFormatContext) {
-            [self readPlay];
-        }
-        // signal을 줘서 decoding 루프가 다시 진행되도록 함
         [self->pauseCondition signal];
+
+        if (self->currentState != 4) {
+            [self sendCurrentState:4];
+        }
+
         [self->pauseCondition unlock];
     });
 }
@@ -249,81 +246,61 @@
 }
 
 //파일로부터 인코딩 된 비디오, 오디오 데이터를 읽어서 packet에 저장하는 함수
-- (void)decoding {
+- (void) decoding {
+    
     if (currentState != 1) {
         [self sendCurrentState:1];
     }
     vFrame = av_frame_alloc();
     aFrame = av_frame_alloc();
     packet = *av_packet_alloc();
-
-    if (pVCtx) {
-        outputFrameSize = CGSizeMake(pVCtx->width, pVCtx->height);
-        NSLog(@"FFmpeg## Video Resolution: %.0f x %.0f", outputFrameSize.width, outputFrameSize.height);
-    } else {
-        outputFrameSize = CGSizeZero;
-    }
-
-    while (!decodingStopped && pFormatContext != NULL) {
+    
+    outputFrameSize = CGSizeMake(self->pVCtx->width, self->pVCtx->height);
+    NSLog(@"FFmpeg## Video Resolution: %.0f x %.0f", outputFrameSize.width, outputFrameSize.height);
+        
+    while (!self->decodingStopped && pFormatContext != NULL) {
         if (currentState != 2) {
             [self sendCurrentState:2];
         }
-
-        // ----------------------------
-        // Pause 처리: av_read_frame 호출 전에 검사
-        // ----------------------------
-        [pauseCondition lock];
-        while (!decodingStopped && isPaused) {
-            // audio player도 일시정지
-            if (self.player.isPlaying) {
-                [self.player pause];
+        while (!self->decodingStopped && [self readFrame:&packet] >= 0) {
+            [self->_delegate receivedVideoSize:outputFrameSize];
+            
+            [self->pauseCondition lock];
+            while (!self->decodingStopped && self->isPaused) {
+                
+                if (_player.isPlaying) {
+                    [_player pause];
+                }
+                
+                if (self->isSeeking) {
+                    NSLog(@"FFmpeg## readSeek");
+                    self->isSeeking = NO;
+                    [self readSeek:seekTarget];
+                }
+                [self->pauseCondition wait];
             }
-            // 대기: resume 시 signal로 깨어남
-            [pauseCondition wait];
-        }
-        // 만약 seek 요청이 들어왔으면 여기에 처리
-        if (!decodingStopped && isSeeking) {
-            double sec = seekTarget;
-            isSeeking = NO;
-            [pauseCondition unlock];
-            [self readSeek:sec];
-            // seek 후 루프 상단으로 되돌아가 다시 읽기
-            continue;
-        }
-        [pauseCondition unlock];
+            [self->pauseCondition unlock];
 
-        // 안전하게 readFrame 시도
-        int r = [self readFrame:&packet];
-        if (r < 0) {
-            // 에러 또는 EOF시 잠시 대기하거나 루프 계속
-            // EOF는 readFrame 내부에서 stopDecoding 처리함
-            continue;
-        }
-
-        // 비디오 패킷 처리
-        if (packet.stream_index == vidx) {
-            if ([self sendPacket:pVCtx packet:&packet] >= 0) {
-                int ret = [self receiveFrame:pVCtx frame:vFrame];
-                if (ret >= 0) {
-                    [self getCurrentTime:vFrame stream:pVStream];
-                    [self drawImage];
+            if (packet.stream_index == vidx) {
+                if ([self sendPacket:pVCtx packet:&packet] >= 0) {
+                    int ret = [self receiveFrame:pVCtx frame:vFrame];
+                    if (ret >= 0) {
+                        [self getCurrentTime:vFrame stream:pVStream];
+                        [self drawImage];
+                    }
                 }
             }
-        }
-
-        // 오디오 패킷 처리
-        if (packet.stream_index == aidx) {
-            if ([self sendPacket:pACtx packet:&packet] >= 0) {
-                int ret = [self receiveFrame:pACtx frame:aFrame];
-                if (ret >= 0) {
-                    [self drawAudio];
+            if (packet.stream_index == aidx) {
+                if ([self sendPacket:pACtx packet:&packet] >= 0) {
+                    int ret = [self receiveFrame:pACtx frame:aFrame];
+                    if (ret >= 0) {
+                        [self drawAudio];
+                    }
                 }
             }
+            av_packet_unref(&packet);
         }
-
-        av_packet_unref(&packet);
     }
-
     [self clear];
 }
 
@@ -480,56 +457,28 @@
     int64_t currentTime = 0;
     int64_t totalDuration = pFormatContext->duration / AV_TIME_BASE;
 
-    // 현재 프레임의 PTS
     int64_t raw_pts = (frame->pts != AV_NOPTS_VALUE) ? frame->pts : frame->best_effort_timestamp;
-
     if (raw_pts == AV_NOPTS_VALUE) {
-        // PTS가 없는 경우 — 이전 값 기준으로 계산
         currentTime = (lastRescaledPTS != -1) ? (lastRescaledPTS + ptsOffset) : 0;
     } else {
-        // stream의 time_base → 초 단위로 변환
         int64_t rescaled_pts = av_rescale_q(raw_pts, stream->time_base, (AVRational){1, 1});
 
         if (hasPendingSeek) {
-            // ✅ Seek 직후 첫 프레임: offset 재설정
+            // seek 직후 첫 프레임: 요청한 초에 맞추기 위한 offset 계산
             ptsOffset = (int64_t)pendingSeekSeconds - rescaled_pts;
             lastRescaledPTS = rescaled_pts;
             hasPendingSeek = NO;
-            NSLog(@"FFmpeg## seek completed: rescaled_pts=%lld, offset=%lld", rescaled_pts, ptsOffset);
-
         } else {
-            // ✅ Pause/Resume 또는 Timestamp Jump 보정
-            if (lastRescaledPTS != -1) {
-                int64_t delta = rescaled_pts - lastRescaledPTS;
-
-                // ✅ RTP timestamp가 리셋된 경우 감지 (resume 후 currentTime=0 현상)
-                if (rescaled_pts < lastRescaledPTS / 2 && rescaled_pts < 10 * AV_TIME_BASE) {
-                    // RTP 세션이 리셋된 것으로 판단 → offset 재계산
-                    ptsOffset = (lastRescaledPTS + ptsOffset) - rescaled_pts;
-                    NSLog(@"FFmpeg## RTP timestamp reset detected, new offset=%lld", ptsOffset);
-                }
-
-                // ✅ 역방향 PTS jump
-                else if (delta < -AV_TIME_BASE) {
-                    ptsOffset += lastRescaledPTS;
-                    NSLog(@"FFmpeg## backward PTS discontinuity detected, adjusted offset=%lld", ptsOffset);
-                }
-
-                // ✅ pause-resume 시 비정상적 forward jump
-                else if (delta > 5 * AV_TIME_BASE) {
-                    ptsOffset -= delta;
-                    NSLog(@"FFmpeg## large PTS jump detected (%.2fs), offset corrected by %lld",
-                          (double)delta / AV_TIME_BASE, delta);
-                }
+            // 일반적인 discontinuity 처리
+            if (lastRescaledPTS != -1 && rescaled_pts < lastRescaledPTS) {
+                ptsOffset += lastRescaledPTS;
             }
-            // 최근 PTS 갱신
             lastRescaledPTS = rescaled_pts;
         }
-        // 최종 currentTime 계산
+
         currentTime = rescaled_pts + ptsOffset;
     }
-    
-    // UI에 전송 (메인 스레드)
+
     dispatch_sync(dispatch_get_main_queue(), ^{
         [self->_delegate receivedCurrentTime:currentTime duration:totalDuration];
     });
