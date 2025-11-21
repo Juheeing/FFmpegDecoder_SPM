@@ -429,56 +429,28 @@
     int64_t currentTime = 0;
     int64_t totalDuration = pFormatContext->duration / AV_TIME_BASE;
 
-    // 현재 프레임의 PTS
     int64_t raw_pts = (frame->pts != AV_NOPTS_VALUE) ? frame->pts : frame->best_effort_timestamp;
-
     if (raw_pts == AV_NOPTS_VALUE) {
-        // PTS가 없는 경우 — 이전 값 기준으로 계산
         currentTime = (lastRescaledPTS != -1) ? (lastRescaledPTS + ptsOffset) : 0;
     } else {
-        // stream의 time_base → 초 단위로 변환
         int64_t rescaled_pts = av_rescale_q(raw_pts, stream->time_base, (AVRational){1, 1});
 
         if (hasPendingSeek) {
-            // ✅ Seek 직후 첫 프레임: offset 재설정
+            // seek 직후 첫 프레임: 요청한 초에 맞추기 위한 offset 계산
             ptsOffset = (int64_t)pendingSeekSeconds - rescaled_pts;
             lastRescaledPTS = rescaled_pts;
             hasPendingSeek = NO;
-            NSLog(@"FFmpeg## seek completed: rescaled_pts=%lld, offset=%lld", rescaled_pts, ptsOffset);
-
         } else {
-            // ✅ Pause/Resume 또는 Timestamp Jump 보정
-            if (lastRescaledPTS != -1) {
-                int64_t delta = rescaled_pts - lastRescaledPTS;
-
-                // ✅ RTP timestamp가 리셋된 경우 감지 (resume 후 currentTime=0 현상)
-                if (rescaled_pts < lastRescaledPTS / 2 && rescaled_pts < 10 * AV_TIME_BASE) {
-                    // RTP 세션이 리셋된 것으로 판단 → offset 재계산
-                    ptsOffset = (lastRescaledPTS + ptsOffset) - rescaled_pts;
-                    NSLog(@"FFmpeg## RTP timestamp reset detected, new offset=%lld", ptsOffset);
-                }
-
-                // ✅ 역방향 PTS jump
-                else if (delta < -AV_TIME_BASE) {
-                    ptsOffset += lastRescaledPTS;
-                    NSLog(@"FFmpeg## backward PTS discontinuity detected, adjusted offset=%lld", ptsOffset);
-                }
-
-                // ✅ pause-resume 시 비정상적 forward jump
-                else if (delta > 5 * AV_TIME_BASE) {
-                    ptsOffset -= delta;
-                    NSLog(@"FFmpeg## large PTS jump detected (%.2fs), offset corrected by %lld",
-                          (double)delta / AV_TIME_BASE, delta);
-                }
+            // 일반적인 discontinuity 처리
+            if (lastRescaledPTS != -1 && rescaled_pts < lastRescaledPTS) {
+                ptsOffset += lastRescaledPTS;
             }
-            // 최근 PTS 갱신
             lastRescaledPTS = rescaled_pts;
         }
-        // 최종 currentTime 계산
+
         currentTime = rescaled_pts + ptsOffset;
     }
-    
-    // UI에 전송 (메인 스레드)
+
     dispatch_sync(dispatch_get_main_queue(), ^{
         [self->_delegate receivedCurrentTime:currentTime duration:totalDuration];
     });
