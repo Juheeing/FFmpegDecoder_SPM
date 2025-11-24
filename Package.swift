@@ -2,6 +2,7 @@
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
+import Foundation
 
 let package = Package(
     name: "FFmpegDecoder",
@@ -39,7 +40,7 @@ let package = Package(
                 .linkedLibrary("resolv"),
                 // FFmpeg 정적 라이브러리
                 .unsafeFlags([
-                    "-L\(String(describing: #filePath).dropLast(13))/libs",
+                    "-L\((#filePath as NSString).deletingLastPathComponent)/libs",
                     "-lavcodec",
                     "-lavfilter",
                     "-lavformat",
