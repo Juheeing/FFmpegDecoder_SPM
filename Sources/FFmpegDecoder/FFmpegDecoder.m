@@ -101,15 +101,6 @@
     });
 }
 
-- (void)seek:(double)seconds {
-    dispatch_async(mDecodingQueue, ^{
-        NSLog(@"FFmpeg## isSeeking");
-        [self->pauseCondition lock];
-        [self->pauseCondition signal];
-        [self->pauseCondition unlock];
-    });
-}
-
 - (void)sendCurrentState:(int)state {
     dispatch_sync(dispatch_get_main_queue(), ^{
         [self->_delegate receivedState:state];
@@ -355,27 +346,36 @@
 }
 
 - (void)getCurrentTime:(AVFrame *)frame stream:(AVStream *)stream {
-    int64_t currentTime = 0;
-    int64_t totalDuration = pFormatContext->duration / AV_TIME_BASE;
+    int64_t currentTimeMs = 0;
+    int64_t totalDurationMs = 0;
+    if (pFormatContext && pFormatContext->duration > 0) {
+        totalDurationMs = av_rescale_q(pFormatContext->duration, AV_TIME_BASE_Q, (AVRational){1, 1000});
+    }
 
     int64_t raw_pts = (frame->pts != AV_NOPTS_VALUE) ? frame->pts : frame->best_effort_timestamp;
     if (raw_pts == AV_NOPTS_VALUE) {
-        currentTime = (lastRescaledPTS != -1) ? (lastRescaledPTS + ptsOffset) : 0;
+        currentTimeMs = (lastRescaledPTS != -1) ? (lastRescaledPTS + ptsOffset) : 0;
     } else {
-        int64_t rescaled_pts = av_rescale_q(raw_pts, stream->time_base, (AVRational){1, 1});
+        int64_t rescaledMs = av_rescale_q(raw_pts, stream->time_base, (AVRational){1, 1000}); // ms
 
-        if (lastRescaledPTS != -1 && rescaled_pts < lastRescaledPTS) {
+        // 작은 재정렬(프레임 재정렬) 무시할 수 있도록 허용오차 추가(예: 50ms)
+        const int64_t kReorderToleranceMs = 50;
+
+        if (lastRescaledPTS != -1 && rescaledMs + kReorderToleranceMs < lastRescaledPTS) {
+            // 큰 역행(타임라인 리셋/분기)으로 판단될 때만 누적
+            // ptsOffsetMs에 lastRescaledPTSMs (마지막 정상 시점) 더하기
             ptsOffset += lastRescaledPTS;
         }
-        lastRescaledPTS = rescaled_pts;
 
-        currentTime = rescaled_pts + ptsOffset;
+        lastRescaledPTS = rescaledMs;
+        currentTimeMs = rescaledMs + ptsOffset;
     }
 
     dispatch_sync(dispatch_get_main_queue(), ^{
-        [self->_delegate receivedCurrentTime:currentTime duration:totalDuration];
+        [self->_delegate receivedCurrentTime: currentTimeMs / 1000 duration: totalDurationMs / 1000];
     });
 }
+
 
 - (void)drawImage {
     int width = vFrame->width;
