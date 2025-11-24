@@ -15,16 +15,11 @@
     int dst_linesize[4];
     int vidx, aidx;
     BOOL decodingStopped;
-    BOOL isPaused, isPlaying, isSeeking;
-    double seekTarget;
+    BOOL isPaused, isPlaying;
     NSCondition *pauseCondition;
     int64_t lastRescaledPTS;      // 이전 프레임 pts (rescaled)
     int64_t ptsOffset;           // 누적 offset
-    BOOL hasPendingSeek;         // seek 직후 첫 프레임에서 보정할 플래그
-    double pendingSeekSeconds;   // 사용자가 요청한 seek 시간
-    double currentBrightness, currentContrast;
     int currentState;
-    float prevContrast, prevBrightness;
 }
 
 + (instancetype)sharedInstance {
@@ -42,17 +37,10 @@
         pauseCondition = [[NSCondition alloc] init];
         decodingStopped = NO;
         isPaused = NO;
-        isSeeking = NO;
         isPlaying = YES;
         lastRescaledPTS = -1;
         ptsOffset = 0;
-        hasPendingSeek = NO;
-        pendingSeekSeconds = 0;
-        currentBrightness = 0.0;
-        currentContrast = 1.0;
         currentState = 0;
-        prevContrast = 0.0;
-        prevBrightness = 0.0;
     }
     return self;
 }
@@ -117,17 +105,8 @@
     dispatch_async(mDecodingQueue, ^{
         NSLog(@"FFmpeg## isSeeking");
         [self->pauseCondition lock];
-        self->seekTarget = seconds;
-        self->isSeeking = YES;
         [self->pauseCondition signal];
         [self->pauseCondition unlock];
-    });
-}
-
-- (void)setBrightness:(double)bright contrast:(double)contrast {
-    dispatch_async(mDecodingQueue, ^{
-        self->currentBrightness = bright;
-        self->currentContrast = contrast;
     });
 }
 
@@ -250,11 +229,6 @@
                 [self readPause];
                 if (_player.isPlaying) {
                     [_player pause];
-                }
-                if (self->isSeeking) {
-                    NSLog(@"FFmpeg## readSeek");
-                    self->isSeeking = NO;
-                    [self readSeek:seekTarget];
                 }
                 [self->pauseCondition wait];
             }
@@ -380,105 +354,24 @@
     return ret;
 }
 
-- (int)readSeek:(double)seconds {
-    int ret = -1;
-
-    @try {
-        if (seconds < 0 || !pFormatContext) {
-            NSLog(@"FFmpeg## Invalid seek time or context is NULL");
-            if (currentState != 7) { [self sendCurrentState:7]; }
-            return -1;
-        }
-
-        lastRescaledPTS = -1;
-        ptsOffset = 0;
-        hasPendingSeek = YES;
-        pendingSeekSeconds = seconds;
-        
-        int64_t timestamp = (int64_t)(seconds * AV_TIME_BASE);
-
-        // 디코더 상태 초기화
-        avcodec_flush_buffers(pVCtx);
-        avcodec_flush_buffers(pACtx);
-
-        // seek 수행
-        ret = av_seek_frame(pFormatContext, -1, timestamp, AVSEEK_FLAG_BACKWARD | AVSEEK_FLAG_ANY);
-
-        NSLog(@"FFmpeg## av_seek_frame to %.2f sec (ts: %lld): %d", seconds, timestamp, ret);
-
-        if (ret < 0) {
-            NSLog(@"FFmpeg## Seek failed");
-            if (currentState != 7) { [self sendCurrentState:7]; }
-            hasPendingSeek = NO;
-        } else {
-            dispatch_sync(dispatch_get_main_queue(), ^{
-                [self->_delegate receivedSeekingState:YES];
-            });
-        }
-    } @catch (NSException *exception) {
-        NSLog(@"FFmpeg## av_seek_frame exception: %@", exception);
-        if (currentState != 7) { [self sendCurrentState:7]; }
-        ret = -1;
-        hasPendingSeek = NO;
-    }
-
-    return ret;
-}
-
 - (void)getCurrentTime:(AVFrame *)frame stream:(AVStream *)stream {
     int64_t currentTime = 0;
     int64_t totalDuration = pFormatContext->duration / AV_TIME_BASE;
 
-    // 현재 프레임의 PTS
     int64_t raw_pts = (frame->pts != AV_NOPTS_VALUE) ? frame->pts : frame->best_effort_timestamp;
-
     if (raw_pts == AV_NOPTS_VALUE) {
-        // PTS가 없는 경우 — 이전 값 기준으로 계산
         currentTime = (lastRescaledPTS != -1) ? (lastRescaledPTS + ptsOffset) : 0;
     } else {
-        // stream의 time_base → 초 단위로 변환
         int64_t rescaled_pts = av_rescale_q(raw_pts, stream->time_base, (AVRational){1, 1});
 
-        if (hasPendingSeek) {
-            // ✅ Seek 직후 첫 프레임: offset 재설정
-            ptsOffset = (int64_t)pendingSeekSeconds - rescaled_pts;
-            lastRescaledPTS = rescaled_pts;
-            hasPendingSeek = NO;
-            NSLog(@"FFmpeg## seek completed: rescaled_pts=%lld, offset=%lld", rescaled_pts, ptsOffset);
-
-        } else {
-            // ✅ Pause/Resume 또는 Timestamp Jump 보정
-            if (lastRescaledPTS != -1) {
-                int64_t delta = rescaled_pts - lastRescaledPTS;
-
-                // ✅ RTP timestamp가 리셋된 경우 감지 (resume 후 currentTime=0 현상)
-                if (rescaled_pts < lastRescaledPTS / 2 && rescaled_pts < 10 * AV_TIME_BASE) {
-                    // RTP 세션이 리셋된 것으로 판단 → offset 재계산
-                    ptsOffset = (lastRescaledPTS + ptsOffset) - rescaled_pts;
-                    NSLog(@"FFmpeg## RTP timestamp reset detected, new offset=%lld", ptsOffset);
-                }
-
-                // ✅ 역방향 PTS jump
-                else if (delta < -AV_TIME_BASE) {
-                    ptsOffset += lastRescaledPTS;
-                    NSLog(@"FFmpeg## backward PTS discontinuity detected, adjusted offset=%lld", ptsOffset);
-                }
-
-                // ✅ pause-resume 시 비정상적 forward jump
-                else if (delta > 5 * AV_TIME_BASE) {
-                    ptsOffset -= delta;
-                    NSLog(@"FFmpeg## large PTS jump detected (%.2fs), offset corrected by %lld",
-                          (double)delta / AV_TIME_BASE, delta);
-                }
-            }
-            // 최근 PTS 갱신
-            lastRescaledPTS = rescaled_pts;
+        if (lastRescaledPTS != -1 && rescaled_pts < lastRescaledPTS) {
+            ptsOffset += lastRescaledPTS;
         }
-        // 최종 currentTime 계산
+        lastRescaledPTS = rescaled_pts;
+
         currentTime = rescaled_pts + ptsOffset;
     }
-    
-    // UI에 전송 (메인 스레드)
+
     dispatch_sync(dispatch_get_main_queue(), ^{
         [self->_delegate receivedCurrentTime:currentTime duration:totalDuration];
     });
@@ -526,23 +419,8 @@
                                           format:kCIFormatRGBA8
                                       colorSpace:CGColorSpaceCreateDeviceRGB()];
 
-    CIImage *outputImage = ciImage;
-
-    // 4️⃣ 밝기/대비 필터 적용: 값 변경이 있을 때만
-    if (self->prevContrast != self->currentContrast || self->prevBrightness != self->currentBrightness) {
-        CIFilter *filter = [CIFilter filterWithName:@"CIColorControls"];
-        [filter setValue:ciImage forKey:kCIInputImageKey];
-        [filter setValue:@(self->currentContrast) forKey:kCIInputContrastKey];
-        [filter setValue:@(self->currentBrightness) forKey:kCIInputBrightnessKey];
-        outputImage = filter.outputImage;
-
-        // 이전 값 업데이트
-        self->prevContrast = self->currentContrast;
-        self->prevBrightness = self->currentBrightness;
-    }
-    // 5️⃣ delegate에 CIImage 직접 전달
     dispatch_sync(dispatch_get_main_queue(), ^{
-        [self->_delegate receivedDecodedCIImage:outputImage];
+        [self->_delegate receivedDecodedCIImage:ciImage];
     });
 }
 
@@ -557,7 +435,7 @@
     if (![self.player isPlaying]) {
         self.engine = [[AVAudioEngine alloc] init];
         self.player = [[AVAudioPlayerNode alloc] init];
-        self.player.volume = 0.5;
+        self.player.volume = 1.0;
         [self.engine attachNode:self.player];
 
         AVAudioMixerNode *mainMixer = [self.engine mainMixerNode];

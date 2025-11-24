@@ -27,7 +27,5 @@
 - (void) stopDecoding;
 - (void) pause;
 - (void) resume;
-- (void) seek:(double)seconds;
-- (void) setBrightness:(double)bright contrast:(double)contrast;
 - (BOOL) isPlaying;
 @end
