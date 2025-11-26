@@ -58,30 +58,46 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
 
     private func openFileInternal(url: String) {
+        print("### FFmpeg: openFileInternal: \(url)")
+        
         var fmtCtx: UnsafeMutablePointer<AVFormatContext>? = avformat_alloc_context()
 
         // 파일 열기
-        if avformat_open_input(&fmtCtx, url, nil, nil) != 0 {
+        let openResult = avformat_open_input(&fmtCtx, url, nil, nil)
+        if openResult != 0 {
+            print("### FFmpeg: avformat_open_input 실패: \(openResult)")
             state = .error
             return
         }
-
-        guard let formatCtx = fmtCtx else { return }
+        print("### FFmpeg: avformat_open_input 성공")
+        
+        guard let formatCtx = fmtCtx else {
+            print("### FFmpeg: formatCtx nil")
+            return
+        }
         self.formatCtx = formatCtx
 
         // 스트림 정보 읽기
-        avformat_find_stream_info(formatCtx, nil)
+        let infoResult = avformat_find_stream_info(formatCtx, nil)
+        if infoResult < 0 {
+            print("### FFmpeg: avformat_find_stream_info 실패: \(infoResult)")
+        } else {
+            print("### FFmpeg: avformat_find_stream_info 성공")
+        }
 
         // 비디오 스트림 찾기
+        videoStreamIndex = -1
         for i in 0 ..< Int(formatCtx.pointee.nb_streams) {
-            let stream = formatCtx.pointee.streams[i]
-            if stream?.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_VIDEO {
+            if let stream = formatCtx.pointee.streams[i],
+               stream.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_VIDEO {
                 videoStreamIndex = Int32(i)
+                print("### FFmpeg: 비디오 스트림 발견: index=\(videoStreamIndex)")
                 break
             }
         }
 
         if videoStreamIndex == -1 {
+            print("### FFmpeg: 비디오 스트림을 찾지 못함")
             state = .error
             return
         }
@@ -93,11 +109,15 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         if duration > 0 {
             durationMs = Int64(av_rescale_q(duration, AV_TIME_BASE_Q, AVRational(num: 1, den: 1000)))
+            print("### FFmpeg: duration(ms) \(durationMs)")
+        } else {
+            print("### FFmpeg: duration 정보 없음(duration <= 0)")
         }
 
         // 비디오 디코더 준비
         prepareVideoDecoder()
 
+        print("### FFmpeg: 디코딩 준비 완료 → readyToPlay")
         state = .readyToPlay
     }
     
@@ -108,19 +128,32 @@ public final class FFmpegDecoder: @unchecked Sendable {
         let codecPar = stream?.pointee.codecpar
 
         guard let codec = avcodec_find_decoder(codecPar?.pointee.codec_id ?? AV_CODEC_ID_NONE) else {
+            print("### FFmpeg: 지원하지 않는 codec \(String(describing: codecPar?.pointee.codec_id.rawValue))")
             state = .error
             return
         }
+        print("### FFmpeg: codec 발견 \(String(cString: codec.pointee.name))")
 
         videoCodecCtx = avcodec_alloc_context3(codec)
-        guard let codecCtx = videoCodecCtx else { return }
+        guard let codecCtx = videoCodecCtx else {
+            print("### FFmpeg: avcodec_alloc_context3 nil")
+            return
+        }
 
         avcodec_parameters_to_context(codecCtx, codecPar)
-        avcodec_open2(codecCtx, codec, nil)
+        
+        let openRet = avcodec_open2(codecCtx, codec, nil)
+        if openRet < 0 {
+            print("### FFmpeg: avcodec_open2 실패: \(openRet)")
+        }
 
+        let width = codecCtx.pointee.width
+        let height = codecCtx.pointee.height
+        print("### FFmpeg: 비디오 해상도 \(width)x\(height)")
+        
         // 해상도 delegate 전달
-        let size = CGSize(width: Int(codecCtx.pointee.width),
-                          height: Int(codecCtx.pointee.height))
+        let size = CGSize(width: Int(width),
+                          height: Int(height))
         delegate?.decoder(self, didReceiveVideoSize: size)
     }
 }
