@@ -5,7 +5,6 @@
 import Foundation
 import AVFoundation
 import CoreImage
-import CoreGraphics
 import FFmpegHeaders
 
 // MARK: - Public types
@@ -42,30 +41,31 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private var audioCodecCtx: UnsafeMutablePointer<AVCodecContext>?
     private var videoStreamIndex: Int32 = -1
     private var audioStreamIndex: Int32 = -1
-    var videoStream: UnsafeMutablePointer<AVStream>?
-    var audioStream: UnsafeMutablePointer<AVStream>?
+    private var videoStream: UnsafeMutablePointer<AVStream>?
+    private var audioStream: UnsafeMutablePointer<AVStream>?
     
     // MARK: - Frames / Packet
-    var vFrame: UnsafeMutablePointer<AVFrame>?
-    var aFrame: UnsafeMutablePointer<AVFrame>?
-    var packet = AVPacket()
+    private var vFrame: UnsafeMutablePointer<AVFrame>?
+    private var aFrame: UnsafeMutablePointer<AVFrame>?
+    private var packet = AVPacket()
+    private var pktPtr: UnsafeMutablePointer<AVPacket>? = nil
     
     // MARK: - State
-    var decodingStopped = false
-    var isPaused = false
-    var isPlaying = false
-    var currentState: Int = 0
+    private var decodingStopped = false
+    private var isPaused = false
+    private var isPlaying = false
+    private var currentState: Int = 0
 
     // MARK: - Video Convert
-    var swsCtx: OpaquePointer?
-    var dstData = [UnsafeMutablePointer<UInt8>?](repeating: nil, count: 4)
-    var dstLineSize = [Int32](repeating: 0, count: 4)
+    private var swsCtx: OpaquePointer?
+    private var dstData = [UnsafeMutablePointer<UInt8>?](repeating: nil, count: 4)
+    private var dstLineSize = [Int32](repeating: 0, count: 4)
 
-    var outputFrameSize: CGSize = .zero
+    private var outputFrameSize: CGSize = .zero
 
     // MARK: - Audio
-    var engine: AVAudioEngine?
-    var player: AVAudioPlayerNode?
+    private var engine: AVAudioEngine?
+    private var player: AVAudioPlayerNode?
 
     // MARK: - Pause Condition
     private let pauseCondition = NSCondition()
@@ -87,21 +87,21 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
 
     private func openFileInternal(url: String) {
-        print("### FFmpeg: openFileInternal \(url)")
+        print("FFmpeg## openFileInternal: \(url)")
         
         var fmtCtx: UnsafeMutablePointer<AVFormatContext>? = avformat_alloc_context()
 
         // 파일 열기
         let openResult = avformat_open_input(&fmtCtx, url, nil, nil)
         if openResult != 0 {
-            print("### FFmpeg: avformat_open_input 실패 \(openResult)")
+            print("FFmpeg## avformat_open_input 실패: \(openResult)")
             state = .error
             return
         }
-        print("### FFmpeg: avformat_open_input 성공")
+        print("FFmpeg## avformat_open_input 성공")
         
         guard let formatCtx = fmtCtx else {
-            print("### FFmpeg: formatCtx nil")
+            print("FFmpeg## formatCtx nil")
             return
         }
         self.formatCtx = formatCtx
@@ -109,9 +109,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
         // 스트림 정보 읽기
         let infoResult = avformat_find_stream_info(formatCtx, nil)
         if infoResult < 0 {
-            print("### FFmpeg: avformat_find_stream_info 실패 \(infoResult)")
+            print("FFmpeg## avformat_find_stream_info 실패: \(infoResult)")
         } else {
-            print("### FFmpeg: avformat_find_stream_info 성공")
+            print("FFmpeg## avformat_find_stream_info 성공")
         }
 
         // 비디오 오디오 스트림 찾기
@@ -121,23 +121,23 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
             if codecType == AVMEDIA_TYPE_VIDEO && videoStreamIndex == -1 {
                 videoStreamIndex = Int32(i)
-                print("### FFmpeg: 비디오 스트림 발견 index = \(videoStreamIndex)")
+                print("FFmpeg## 비디오 스트림 발견 index: \(videoStreamIndex)")
             }
 
             if codecType == AVMEDIA_TYPE_AUDIO && audioStreamIndex == -1 {
                 audioStreamIndex = Int32(i)
-                print("### FFmpeg: 오디오 스트림 발견 index = \(audioStreamIndex)")
+                print("FFmpeg## 오디오 스트림 발견 index: \(audioStreamIndex)")
             }
         }
 
         if videoStreamIndex == -1 {
-            print("### FFmpeg: 비디오 스트림을 찾지 못함")
+            print("FFmpeg## 비디오 스트림을 찾지 못함")
             state = .error
             return
         }
         
         if audioStreamIndex == -1 {
-            print("### FFmpeg: 오디오 스트림을 찾지 못함")
+            print("FFmpeg## 오디오 스트림을 찾지 못함")
             state = .error
             return
         }
@@ -149,16 +149,16 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         if duration > 0 {
             durationMs = Int64(av_rescale_q(duration, AV_TIME_BASE_Q, AVRational(num: 1, den: 1000)))
-            print("### FFmpeg: duration(ms) \(durationMs)")
+            print("FFmpeg## duration(ms): \(durationMs)")
         } else {
-            print("### FFmpeg: duration 정보 없음(duration <= 0)")
+            print("FFmpeg## duration 정보 없음(duration <= 0)")
         }
 
         // 비디오 오디오 디코더 준비
         prepareVideoDecoder()
         prepareAudioDecoder()
         
-        print("### FFmpeg: 디코딩 준비 완료 → readyToPlay")
+        print("FFmpeg## 디코딩 준비 완료 → readyToPlay")
         state = .readyToPlay
         
         decoding()
@@ -171,15 +171,15 @@ public final class FFmpegDecoder: @unchecked Sendable {
         let codecPar = stream?.pointee.codecpar
 
         guard let codec = avcodec_find_decoder(codecPar?.pointee.codec_id ?? AV_CODEC_ID_NONE) else {
-            print("### FFmpeg: 지원하지 않는 video codec \(String(describing: codecPar?.pointee.codec_id.rawValue))")
+            print("FFmpeg## 지원하지 않는 video codec: \(String(describing: codecPar?.pointee.codec_id.rawValue))")
             state = .error
             return
         }
-        print("### FFmpeg: video codec 발견 \(String(cString: codec.pointee.name))")
+        print("FFmpeg## video codec 발견: \(String(cString: codec.pointee.name))")
 
         videoCodecCtx = avcodec_alloc_context3(codec)
         guard let codecCtx = videoCodecCtx else {
-            print("### FFmpeg: avcodec_alloc_context3(video) 실패")
+            print("FFmpeg## avcodec_alloc_context3(video) 실패")
             return
         }
 
@@ -187,12 +187,12 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         let openRet = avcodec_open2(codecCtx, codec, nil)
         if openRet < 0 {
-            print("### FFmpeg: avcodec_open2(video) 실패 \(openRet)")
+            print("FFmpeg## avcodec_open2(video) 실패: \(openRet)")
         }
 
         let width = codecCtx.pointee.width
         let height = codecCtx.pointee.height
-        print("### FFmpeg: 비디오 해상도 \(width)x\(height)")
+        print("FFmpeg## 비디오 해상도: \(width)x\(height)")
         
         // 해상도 delegate 전달
         let size = CGSize(width: Int(width),
@@ -207,15 +207,15 @@ public final class FFmpegDecoder: @unchecked Sendable {
         let codecPar = stream?.pointee.codecpar
 
         guard let codec = avcodec_find_decoder(codecPar?.pointee.codec_id ?? AV_CODEC_ID_NONE) else {
-            print("### FFmpeg: 지원하지 않는 audio codec \(String(describing: codecPar?.pointee.codec_id.rawValue))")
+            print("FFmpeg## 지원하지 않는 audio codec: \(String(describing: codecPar?.pointee.codec_id.rawValue))")
             state = .error
             return
         }
-        print("### FFmpeg: audio codec 발견 \(String(cString: codec.pointee.name))")
+        print("FFmpeg## audio codec 발견: \(String(cString: codec.pointee.name))")
 
         audioCodecCtx = avcodec_alloc_context3(codec)
         guard let codecCtx = audioCodecCtx else {
-            print("### FFmpeg: avcodec_alloc_context3(audio) 실패")
+            print("FFmpeg## avcodec_alloc_context3(audio) 실패")
             return
         }
 
@@ -223,14 +223,14 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         let openRet = avcodec_open2(codecCtx, codec, nil)
         if openRet < 0 {
-            print("### FFmpeg: avcodec_open2(audio) 실패 \(openRet)")
+            print("FFmpeg## avcodec_open2(audio) 실패: \(openRet)")
             return
         }
 
-        print("### FFmpeg: sample rate = \(codecCtx.pointee.sample_rate)")
-        print("### FFmpeg: channels = \(codecCtx.pointee.ch_layout.nb_channels)")
-        print("### FFmpeg: channel layout = \(codecCtx.pointee.ch_layout)")
-        print("### FFmpeg: sample format = \(codecCtx.pointee.sample_fmt.rawValue)")
+        print("FFmpeg## sample rate: \(codecCtx.pointee.sample_rate)")
+        print("FFmpeg## channels: \(codecCtx.pointee.ch_layout.nb_channels)")
+        print("FFmpeg## channel layout: \(codecCtx.pointee.ch_layout)")
+        print("FFmpeg## sample format: \(codecCtx.pointee.sample_fmt.rawValue)")
 
     }
     
@@ -238,64 +238,51 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         if currentState != 1 { sendCurrentState(1) }
 
+        pktPtr = av_packet_alloc()
         vFrame = av_frame_alloc()
         aFrame = av_frame_alloc()
+        guard pktPtr != nil, vFrame != nil, aFrame != nil else {
+            print("FFmpeg## alloc fail")
+            stopDecoding()
+            return
+        }
+        
+        guard let formatCtx = formatCtx else { stopDecoding(); return }
+        guard let videoCodecCtx = videoCodecCtx, let audioCodecCtx = audioCodecCtx else { stopDecoding(); return }
 
-        let pktPtr = av_packet_alloc()!
-        packet = pktPtr.pointee
-
-        outputFrameSize = CGSize(width: Int(videoCodecCtx!.pointee.width),
-                                 height: Int(videoCodecCtx!.pointee.height))
-
+        outputFrameSize = CGSize(width: Int(videoCodecCtx.pointee.width), height: Int(videoCodecCtx.pointee.height))
         print("FFmpeg## Video Resolution: \(outputFrameSize)")
-
-        while !decodingStopped, formatCtx != nil {
-
-            if currentState != 2 { sendCurrentState(2) }
-
-            while !decodingStopped, readFrame(packet: &packet) >= 0 {
-
-                delegate?.decoder(self, didReceiveVideoSize: outputFrameSize)
-
-                pauseCondition.lock()
-                while !decodingStopped, isPaused {
-                    _ = readPause()
-
-                    if player?.isPlaying == true {
-                        player?.pause()
-                    }
-                    pauseCondition.wait()
+        
+        while !decodingStopped {
+            let ret = av_read_frame(formatCtx, pktPtr)
+            if ret < 0 {
+                if ret == EOF {
+                    print("FFmpeg## EOF")
+                    if currentState != 6 { sendCurrentState(6) }
+                } else {
+                    print("FFmpeg## read error \(ret)")
+                    if currentState != 7 { sendCurrentState(7) }
                 }
-                pauseCondition.unlock()
+                break
+            }
 
-                if !isPlaying {
-                    _ = readPlay()
-                    if currentState != 2 { sendCurrentState(2) }
-                }
-
-                // Video
-                if packet.stream_index == videoStreamIndex {
-                    if sendPacket(ctx: videoCodecCtx, packet: &packet) >= 0 {
-                        if receiveFrame(ctx: videoCodecCtx, frame: vFrame) >= 0 {
+            let streamIndex = pktPtr!.pointee.stream_index
+            if streamIndex == videoStreamIndex {
+                if avcodec_send_packet(videoCodecCtx, pktPtr) >= 0 {
+                        while avcodec_receive_frame(videoCodecCtx, vFrame) >= 0 {
                             getCurrentTime(frame: vFrame, stream: videoStream)
                             drawImage()
                         }
+                }
+            } else if streamIndex == audioStreamIndex {
+                if avcodec_send_packet(audioCodecCtx, pktPtr) >= 0 {
+                    while avcodec_receive_frame(audioCodecCtx, aFrame) >= 0 {
+                        drawAudio()
                     }
                 }
-
-                // Audio
-                if packet.stream_index == audioStreamIndex {
-                    if sendPacket(ctx: audioCodecCtx, packet: &packet) >= 0 {
-                        if receiveFrame(ctx: audioCodecCtx, frame: aFrame) >= 0 {
-                            drawAudio()
-                        }
-                    }
-                }
-
-                av_packet_unref(&packet)
             }
+            av_packet_unref(pktPtr)
         }
-
         clear()
     }
 
@@ -364,22 +351,24 @@ public final class FFmpegDecoder: @unchecked Sendable {
     func getCurrentTime(frame: UnsafeMutablePointer<AVFrame>?,
                         stream: UnsafeMutablePointer<AVStream>?) {
 
-        guard let frame, let stream else { return }
-
-        var pts = frame.pointee.pts
+        guard let frame = frame, let stream = stream else { return }
         
-        currentTimeMs = av_rescale_q(
-            pts,
-            stream.pointee.time_base,
-            AVRational(num: 1, den: 1000)
-        )
-
-        currentTimeMs /= 1000
-
-        print("🟢 현재 재생 시간: \(currentTimeMs) 초 / 전체: \(durationMs) 초")
-
-        DispatchQueue.main.sync {
-            self.delegate?.decoder(self, didUpdateCurrentTime: currentTimeMs, duration: durationMs)
+        let AV_NOPTS_VALUE: Int64 = Int64.min
+        var pts = frame.pointee.best_effort_timestamp
+        
+        if pts == AV_NOPTS_VALUE {
+            pts = frame.pointee.pts
+            
+            if pts == AV_NOPTS_VALUE {
+                return
+            }
+        }
+        
+        let ms = av_rescale_q(pts, stream.pointee.time_base, AVRational(num: 1, den: 1000))
+        currentTimeMs = Int64(ms)
+        
+        DispatchQueue.main.async {
+            self.delegate?.decoder(self, didUpdateCurrentTime: self.currentTimeMs, duration: self.durationMs)
         }
     }
 
@@ -405,7 +394,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     func sendCurrentState(_ state: Int) {
         currentState = state
-        print("State -> \(state)")
+        print("FFmpeg## State -> \(state)")
     }
 
     func stopDecoding() {
