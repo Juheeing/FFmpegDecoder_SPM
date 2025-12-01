@@ -42,6 +42,33 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private var audioCodecCtx: UnsafeMutablePointer<AVCodecContext>?
     private var videoStreamIndex: Int32 = -1
     private var audioStreamIndex: Int32 = -1
+    var videoStream: UnsafeMutablePointer<AVStream>?
+    var audioStream: UnsafeMutablePointer<AVStream>?
+    
+    // MARK: - Frames / Packet
+    var vFrame: UnsafeMutablePointer<AVFrame>?
+    var aFrame: UnsafeMutablePointer<AVFrame>?
+    var packet = AVPacket()
+    
+    // MARK: - State
+    var decodingStopped = false
+    var isPaused = false
+    var isPlaying = false
+    var currentState: Int = 0
+
+    // MARK: - Video Convert
+    var swsCtx: OpaquePointer?
+    var dstData = [UnsafeMutablePointer<UInt8>?](repeating: nil, count: 4)
+    var dstLineSize = [Int32](repeating: 0, count: 4)
+
+    var outputFrameSize: CGSize = .zero
+
+    // MARK: - Audio
+    var engine: AVAudioEngine?
+    var player: AVAudioPlayerNode?
+
+    // MARK: - Pause Condition
+    private let pauseCondition = NSCondition()
 
     // 디코딩 스레드
     private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
@@ -133,6 +160,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         print("### FFmpeg: 디코딩 준비 완료 → readyToPlay")
         state = .readyToPlay
+        
+        decoding()
     }
     
     private func prepareVideoDecoder() {
@@ -202,5 +231,190 @@ public final class FFmpegDecoder: @unchecked Sendable {
         print("### FFmpeg: channels = \(codecCtx.pointee.ch_layout.nb_channels)")
         print("### FFmpeg: channel layout = \(codecCtx.pointee.ch_layout)")
         print("### FFmpeg: sample format = \(codecCtx.pointee.sample_fmt.rawValue)")
+
+    }
+    
+    func decoding() {
+
+        if currentState != 1 { sendCurrentState(1) }
+
+        vFrame = av_frame_alloc()
+        aFrame = av_frame_alloc()
+
+        let pktPtr = av_packet_alloc()!
+        packet = pktPtr.pointee
+
+        outputFrameSize = CGSize(width: Int(videoCodecCtx!.pointee.width),
+                                 height: Int(videoCodecCtx!.pointee.height))
+
+        print("FFmpeg## Video Resolution: \(outputFrameSize)")
+
+        while !decodingStopped, formatCtx != nil {
+
+            if currentState != 2 { sendCurrentState(2) }
+
+            while !decodingStopped, readFrame(packet: &packet) >= 0 {
+
+                delegate?.decoder(self, didReceiveVideoSize: outputFrameSize)
+
+                pauseCondition.lock()
+                while !decodingStopped, isPaused {
+                    _ = readPause()
+
+                    if player?.isPlaying == true {
+                        player?.pause()
+                    }
+                    pauseCondition.wait()
+                }
+                pauseCondition.unlock()
+
+                if !isPlaying {
+                    _ = readPlay()
+                    if currentState != 2 { sendCurrentState(2) }
+                }
+
+                // Video
+                if packet.stream_index == videoStreamIndex {
+                    if sendPacket(ctx: videoCodecCtx, packet: &packet) >= 0 {
+                        if receiveFrame(ctx: videoCodecCtx, frame: vFrame) >= 0 {
+                            getCurrentTime(frame: vFrame, stream: videoStream)
+                            drawImage()
+                        }
+                    }
+                }
+
+                // Audio
+                if packet.stream_index == audioStreamIndex {
+                    if sendPacket(ctx: audioCodecCtx, packet: &packet) >= 0 {
+                        if receiveFrame(ctx: audioCodecCtx, frame: aFrame) >= 0 {
+                            drawAudio()
+                        }
+                    }
+                }
+
+                av_packet_unref(&packet)
+            }
+        }
+
+        clear()
+    }
+
+    // MARK: - Read Frame
+    func readFrame(packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
+        guard let fmt = formatCtx else { return -1 }
+
+        let ret = av_read_frame(fmt, packet)
+
+        if ret == EOF {
+            print("FFmpeg## readFrame EOF")
+            stopDecoding()
+            if currentState != 6 { sendCurrentState(6) }
+        }
+
+        return ret
+    }
+
+    func sendPacket(ctx: UnsafeMutablePointer<AVCodecContext>?,
+                    packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
+
+        guard let ctx else { return -1 }
+        return avcodec_send_packet(ctx, packet)
+    }
+
+    func receiveFrame(ctx: UnsafeMutablePointer<AVCodecContext>?,
+                      frame: UnsafeMutablePointer<AVFrame>?) -> Int32 {
+
+        guard let ctx else { return -1 }
+        return avcodec_receive_frame(ctx, frame)
+    }
+
+    // MARK: - Play / Pause
+    func readPlay() -> Int32 {
+        guard let fmt = formatCtx else { return -1 }
+
+        isPlaying = true
+        let ret = av_read_play(fmt)
+
+        if ret >= 0 {
+            if currentState != 4 { sendCurrentState(4) }
+        } else {
+            if currentState != 7 { sendCurrentState(7) }
+            print("FFmpeg## av_read_play error: \(ret)")
+        }
+        return ret
+    }
+
+    func readPause() -> Int32 {
+        guard let fmt = formatCtx else { return -1 }
+
+        isPlaying = false
+        let ret = av_read_pause(fmt)
+
+        if ret >= 0 {
+            if currentState != 5 { sendCurrentState(5) }
+        } else {
+            if currentState != 7 { sendCurrentState(7) }
+            print("FFmpeg## av_read_pause error: \(ret)")
+        }
+
+        return ret
+    }
+
+    // MARK: - Get Current Time
+    func getCurrentTime(frame: UnsafeMutablePointer<AVFrame>?,
+                        stream: UnsafeMutablePointer<AVStream>?) {
+
+        guard let frame, let stream else { return }
+
+        var pts = frame.pointee.pts
+        
+        currentTimeMs = av_rescale_q(
+            pts,
+            stream.pointee.time_base,
+            AVRational(num: 1, den: 1000)
+        )
+
+        currentTimeMs /= 1000
+
+        print("🟢 현재 재생 시간: \(currentTimeMs) 초 / 전체: \(durationMs) 초")
+
+        DispatchQueue.main.sync {
+            self.delegate?.decoder(self, didUpdateCurrentTime: currentTimeMs, duration: durationMs)
+        }
+    }
+
+    // MARK: - Draw Image
+    func drawImage() {
+
+    }
+
+    // MARK: - Draw Audio
+    func drawAudio() {
+
+    }
+
+    func playAudioFrame(_ frame: UnsafeMutablePointer<AVFrame>) -> Data {
+        let bytesPerSample = Int(av_get_bytes_per_sample(audioCodecCtx!.pointee.sample_fmt))
+        let channels = Int(audioCodecCtx!.pointee.ch_layout.nb_channels)
+        let count = bytesPerSample * channels * Int(frame.pointee.nb_samples)
+
+        return Data(bytes: frame.pointee.data.0!, count: count)
+    }
+
+    // MARK: - Utility
+
+    func sendCurrentState(_ state: Int) {
+        currentState = state
+        print("State -> \(state)")
+    }
+
+    func stopDecoding() {
+        decodingStopped = true
+    }
+
+    func clear() {
+        av_frame_free(&vFrame)
+        av_frame_free(&aFrame)
+        sws_freeContext(swsCtx)
     }
 }
