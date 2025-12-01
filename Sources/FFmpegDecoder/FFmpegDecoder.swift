@@ -416,8 +416,138 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
 
     // MARK: - Draw Image
-    func drawImage() {
+    private func drawImage() {
+        guard let vFrame = vFrame,
+              let videoCodecCtx = videoCodecCtx else { return }
 
+        let srcWidth = Int(vFrame.pointee.width)
+        let srcHeight = Int(vFrame.pointee.height)
+        let srcFormat = AVPixelFormat(rawValue: vFrame.pointee.format)
+        let dstFormat = AV_PIX_FMT_BGRA // BGRA -> CGImage/CIImage에 적합
+
+        // prepare swsCtx and dst buffers once
+        if swsCtx == nil {
+            swsCtx = sws_getContext(
+                Int32(srcWidth), Int32(srcHeight), srcFormat,
+                Int32(srcWidth), Int32(srcHeight), dstFormat,
+                SWS_BILINEAR, nil, nil, nil
+            )
+
+            if swsCtx == nil {
+                print("FFmpeg## sws_getContext 실패")
+                return
+            }
+
+            // 버퍼 사이즈 계산 및 할당
+            let bufSize = av_image_get_buffer_size(dstFormat, Int32(srcWidth), Int32(srcHeight), 1)
+            if bufSize <= 0 {
+                print("FFmpeg## av_image_get_buffer_size 실패")
+                return
+            }
+
+            let rawBuffer = av_malloc(Int(bufSize))
+            if rawBuffer == nil {
+                print("FFmpeg## av_malloc 실패")
+                return
+            }
+
+            // dstData와 dstLineSize를 av_image_fill_arrays로 채운다.
+            // dstData는 [UnsafeMutablePointer<UInt8>?] 타입이므로, withUnsafeMutableBufferPointer로 포인터를 넘겨준다.
+            dstData = [UnsafeMutablePointer<UInt8>?](repeating: nil, count: 4)
+            dstLineSize = [Int32](repeating: 0, count: 4)
+
+            // av_image_fill_arrays expects UnsafeMutablePointer<UnsafeMutablePointer<UInt8>?>?
+            dstData.withUnsafeMutableBufferPointer { ptr in
+                let px = ptr.baseAddress!
+                av_image_fill_arrays(px, &dstLineSize, rawBuffer!.assumingMemoryBound(to: UInt8.self), dstFormat, Int32(srcWidth), Int32(srcHeight), 1)
+            }
+        }
+
+        // MARK: - 튜플 → 배열 변환
+        let srcDataArray: [UnsafePointer<UInt8>?] = [
+            vFrame.pointee.data.0.map { UnsafePointer($0) },
+            vFrame.pointee.data.1.map { UnsafePointer($0) },
+            vFrame.pointee.data.2.map { UnsafePointer($0) },
+            vFrame.pointee.data.3.map { UnsafePointer($0) },
+            vFrame.pointee.data.4.map { UnsafePointer($0) },
+            vFrame.pointee.data.5.map { UnsafePointer($0) },
+            vFrame.pointee.data.6.map { UnsafePointer($0) },
+            vFrame.pointee.data.7.map { UnsafePointer($0) }
+        ]
+
+        let srcLinesizeArray: [Int32] = [
+            vFrame.pointee.linesize.0,
+            vFrame.pointee.linesize.1,
+            vFrame.pointee.linesize.2,
+            vFrame.pointee.linesize.3,
+            vFrame.pointee.linesize.4,
+            vFrame.pointee.linesize.5,
+            vFrame.pointee.linesize.6,
+            vFrame.pointee.linesize.7
+        ]
+
+        // MARK: - sws_scale 호출
+        let scaled = dstData.withUnsafeMutableBufferPointer { dstPtr -> Int32 in
+            return sws_scale(
+                swsCtx,
+                srcDataArray,
+                srcLinesizeArray,
+                0,
+                Int32(srcHeight),
+                dstPtr.baseAddress,
+                &dstLineSize
+            )
+        }
+
+        if scaled <= 0 {
+            print("FFmpeg## sws_scale 실패 또는 0 frames: \(scaled)")
+            return
+        }
+
+        guard let dst0 = dstData[0] else {
+            print("FFmpeg## dstData[0] nil")
+            return
+        }
+
+        // bytesPerRow & dataSize
+        let bytesPerRow = Int(dstLineSize[0])
+        let dataSize = bytesPerRow * srcHeight
+
+        // UnsafeRawPointer로 Data 생성
+        let rawPointer = UnsafeRawPointer(dst0)
+        let imageData = Data(bytes: rawPointer, count: dataSize)
+
+        // CGImage 생성 (BGRA, little endian, premultiplied first)
+        guard let provider = CGDataProvider(data: imageData as CFData) else {
+            print("FFmpeg## CGDataProvider 생성 실패")
+            return
+        }
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue).union(.byteOrder32Little)
+
+        guard let cgImage = CGImage(
+            width: srcWidth,
+            height: srcHeight,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo,
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: true,
+            intent: .defaultIntent
+        ) else {
+            print("FFmpeg## CGImage 생성 실패")
+            return
+        }
+
+        let ciImage = CIImage(cgImage: cgImage)
+
+        DispatchQueue.main.async {
+            self.delegate?.decoder(self, didReceiveDecodedImage: ciImage)
+        }
     }
 
     // MARK: - Draw Audio

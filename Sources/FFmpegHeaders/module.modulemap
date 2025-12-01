@@ -2,9 +2,11 @@ module FFmpegHeaders {
     header "libavformat/avformat.h"
     header "libavcodec/avcodec.h"
     header "libswscale/swscale.h"
-    header "libavutil/avutil.h"      
+    header "libavutil/avutil.h"
+    header "libavutil/imgutils.h"
     header "libavfilter/avfilter.h"
     header "libswresample/swresample.h"
+    header "libavutil/imgutils.h"
     export *
 }
 
