@@ -92,7 +92,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
         var fmtCtx: UnsafeMutablePointer<AVFormatContext>? = avformat_alloc_context()
 
         // 파일 열기
-        let openResult = avformat_open_input(&fmtCtx, url, nil, nil)
+        var options: OpaquePointer? = nil
+        av_dict_set(&options, "rtsp_transport", "tcp", 0)
+        av_dict_set(&options, "max_delay", "500000", 0)
+
+        let openResult = avformat_open_input(&fmtCtx, url, nil, &options)
         if openResult != 0 {
             print("FFmpeg## avformat_open_input 실패: \(openResult)")
             state = .error
@@ -247,14 +251,26 @@ public final class FFmpegDecoder: @unchecked Sendable {
             return
         }
         
-        guard let formatCtx = formatCtx else { stopDecoding(); return }
-        guard let videoCodecCtx = videoCodecCtx, let audioCodecCtx = audioCodecCtx else { stopDecoding(); return }
+        guard let formatCtx = formatCtx else {
+            print("FFmpeg## formatCtx nil")
+            stopDecoding();
+            return
+        }
+
+        guard let videoCodecCtx = videoCodecCtx, let audioCodecCtx = audioCodecCtx else {
+            print("FFmpeg## codecCtx nil")
+            stopDecoding();
+            return
+        }
 
         outputFrameSize = CGSize(width: Int(videoCodecCtx.pointee.width), height: Int(videoCodecCtx.pointee.height))
         print("FFmpeg## Video Resolution: \(outputFrameSize)")
         
         while !decodingStopped {
+            
             let ret = av_read_frame(formatCtx, pktPtr)
+            print("FFmpeg## read frame ret = \(ret)")
+            
             if ret < 0 {
                 if ret == EOF {
                     print("FFmpeg## EOF")
@@ -267,20 +283,47 @@ public final class FFmpegDecoder: @unchecked Sendable {
             }
 
             let streamIndex = pktPtr!.pointee.stream_index
+
             if streamIndex == videoStreamIndex {
-                if avcodec_send_packet(videoCodecCtx, pktPtr) >= 0 {
-                        while avcodec_receive_frame(videoCodecCtx, vFrame) >= 0 {
-                            getCurrentTime(frame: vFrame, stream: videoStream)
-                            drawImage()
-                        }
+
+                let sendRet = avcodec_send_packet(videoCodecCtx, pktPtr)
+                print("FFmpeg## avcodec_send_packet (video) = \(sendRet)")
+
+                if sendRet >= 0 {
+                    while true {
+                        let recvRet = avcodec_receive_frame(videoCodecCtx, vFrame)
+                        print("FFmpeg## avcodec_receive_frame (video) = \(recvRet)")
+                        
+                        if recvRet < 0 { break }
+                        
+                        print("FFmpeg## got video frame vFrame: \(String(describing: vFrame))")
+                        print("FFmpeg## vFrame pts = \(vFrame!.pointee.pts), best_effort = \(vFrame!.pointee.best_effort_timestamp)")
+                        
+                        print("FFmpeg## calling getCurrentTime with frame=\(String(describing: vFrame)), stream=\(String(describing: videoStream))")
+                        getCurrentTime(frame: vFrame, stream: videoStream)
+                        
+                        drawImage()
+                    }
                 }
             } else if streamIndex == audioStreamIndex {
-                if avcodec_send_packet(audioCodecCtx, pktPtr) >= 0 {
-                    while avcodec_receive_frame(audioCodecCtx, aFrame) >= 0 {
+
+                let sendRet = avcodec_send_packet(audioCodecCtx, pktPtr)
+                print("FFmpeg## avcodec_send_packet (audio) = \(sendRet)")
+
+                if sendRet >= 0 {
+                    while true {
+                        let recvRet = avcodec_receive_frame(audioCodecCtx, aFrame)
+                        print("FFmpeg## avcodec_receive_frame (audio) = \(recvRet)")
+
+                        if recvRet < 0 { break }
+
+                        print("FFmpeg## got audio frame aFrame: \(String(describing: aFrame))")
+
                         drawAudio()
                     }
                 }
             }
+
             av_packet_unref(pktPtr)
         }
         clear()
