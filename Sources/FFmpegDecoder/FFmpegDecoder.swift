@@ -54,7 +54,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private var decodingStopped = false
     private var isPaused = false
     private var isPlaying = false
-    private var currentState: Int = 0
 
     // MARK: - Video Convert
     private var swsCtx: OpaquePointer?
@@ -240,7 +239,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
     func decoding() {
 
-        if currentState != 1 { sendCurrentState(1) }
+        if state != .preparing { state = .preparing }
 
         pktPtr = av_packet_alloc()
         vFrame = av_frame_alloc()
@@ -270,10 +269,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
             if ret < 0 {
                 if ret == EOF {
                     print("FFmpeg## EOF")
-                    if currentState != 6 { sendCurrentState(6) }
+                    if state != .playedToTheEnd { state = .playedToTheEnd }
                 } else {
                     print("FFmpeg## read error \(ret)")
-                    if currentState != 7 { sendCurrentState(7) }
+                    if state != .error { state = .error }
                 }
                 break
             }
@@ -323,7 +322,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if ret == EOF {
             print("FFmpeg## readFrame EOF")
             stopDecoding()
-            if currentState != 6 { sendCurrentState(6) }
+            if state != .playedToTheEnd { state = .playedToTheEnd }
         }
 
         return ret
@@ -351,9 +350,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
         let ret = av_read_play(fmt)
 
         if ret >= 0 {
-            if currentState != 4 { sendCurrentState(4) }
+            if state != .bufferFinished { state = .bufferFinished }
         } else {
-            if currentState != 7 { sendCurrentState(7) }
+            if state != .error { state = .error }
             print("FFmpeg## av_read_play error: \(ret)")
         }
         return ret
@@ -366,9 +365,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
         let ret = av_read_pause(fmt)
 
         if ret >= 0 {
-            if currentState != 5 { sendCurrentState(5) }
+            if state != .paused { state = .paused }
         } else {
-            if currentState != 7 { sendCurrentState(7) }
+            if state != .error { state = .error }
             print("FFmpeg## av_read_pause error: \(ret)")
         }
 
@@ -551,12 +550,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
 
     // MARK: - Utility
-
-    func sendCurrentState(_ state: Int) {
-        currentState = state
-        print("FFmpeg## State -> \(state)")
-    }
-
     func stopDecoding() {
         decodingStopped = true
     }
