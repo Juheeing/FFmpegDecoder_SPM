@@ -199,9 +199,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         // 해상도 delegate 전달
         let size = CGSize(width: Int(width),
                           height: Int(height))
-        DispatchQueue.main.sync {
-            self.delegate?.decoder(self, didReceiveVideoSize: size)
-        }
+        delegate?.decoder(self, didReceiveVideoSize: size)
     }
     
     private func prepareAudioDecoder() {
