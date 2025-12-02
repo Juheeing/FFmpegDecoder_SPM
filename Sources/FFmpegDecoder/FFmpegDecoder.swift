@@ -269,7 +269,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         while !decodingStopped {
             
             let ret = av_read_frame(formatCtx, pktPtr)
-            print("FFmpeg## read frame ret = \(ret)")
             
             if ret < 0 {
                 if ret == EOF {
@@ -287,37 +286,26 @@ public final class FFmpegDecoder: @unchecked Sendable {
             if streamIndex == videoStreamIndex {
 
                 let sendRet = avcodec_send_packet(videoCodecCtx, pktPtr)
-                print("FFmpeg## avcodec_send_packet (video) = \(sendRet)")
 
                 if sendRet >= 0 {
                     while true {
                         let recvRet = avcodec_receive_frame(videoCodecCtx, vFrame)
-                        print("FFmpeg## avcodec_receive_frame (video) = \(recvRet)")
                         
                         if recvRet < 0 { break }
                         
-                        print("FFmpeg## got video frame vFrame: \(String(describing: vFrame))")
-                        print("FFmpeg## vFrame pts = \(vFrame!.pointee.pts), best_effort = \(vFrame!.pointee.best_effort_timestamp)")
-                        
-                        print("FFmpeg## calling getCurrentTime with frame=\(String(describing: vFrame)), stream=\(String(describing: videoStream))")
                         getCurrentTime(frame: vFrame, stream: videoStream)
-                        
                         drawImage()
                     }
                 }
             } else if streamIndex == audioStreamIndex {
 
                 let sendRet = avcodec_send_packet(audioCodecCtx, pktPtr)
-                print("FFmpeg## avcodec_send_packet (audio) = \(sendRet)")
 
                 if sendRet >= 0 {
                     while true {
                         let recvRet = avcodec_receive_frame(audioCodecCtx, aFrame)
-                        print("FFmpeg## avcodec_receive_frame (audio) = \(recvRet)")
 
                         if recvRet < 0 { break }
-
-                        print("FFmpeg## got audio frame aFrame: \(String(describing: aFrame))")
 
                         drawAudio()
                     }
@@ -410,7 +398,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         let ms = av_rescale_q(pts, stream.pointee.time_base, AVRational(num: 1, den: 1000))
         currentTimeMs = Int64(ms)
         
-        DispatchQueue.main.async {
+        DispatchQueue.main.sync {
             self.delegate?.decoder(self, didUpdateCurrentTime: self.currentTimeMs, duration: self.durationMs)
         }
     }
@@ -545,7 +533,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         let ciImage = CIImage(cgImage: cgImage)
 
-        DispatchQueue.main.async {
+        DispatchQueue.main.sync {
             self.delegate?.decoder(self, didReceiveDecodedImage: ciImage)
         }
     }
