@@ -61,8 +61,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private var dstData = [UnsafeMutablePointer<UInt8>?](repeating: nil, count: 4)
     private var dstLineSize = [Int32](repeating: 0, count: 4)
 
-    private var outputFrameSize: CGSize = .zero
-
     // MARK: - Audio
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
@@ -193,6 +191,17 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if openRet < 0 {
             print("FFmpeg## avcodec_open2(video) 실패: \(openRet)")
         }
+        
+        let width = codecCtx.pointee.width
+        let height = codecCtx.pointee.height
+        print("FFmpeg## 비디오 해상도: \(width)x\(height)")
+        
+        // 해상도 delegate 전달
+        let size = CGSize(width: Int(width),
+                          height: Int(height))
+        DispatchQueue.main.sync {
+            self.delegate?.decoder(self, didReceiveVideoSize: size)
+        }
     }
     
     private func prepareAudioDecoder() {
@@ -253,16 +262,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
             stopDecoding();
             return
         }
-
-        outputFrameSize = CGSize(width: Int(videoCodecCtx.pointee.width), height: Int(videoCodecCtx.pointee.height))
-        print("FFmpeg## Video Resolution: \(outputFrameSize)")
         
         while !decodingStopped {
             
             let ret = av_read_frame(formatCtx, pktPtr)
-            
-            delegate?.decoder(self, didReceiveVideoSize: outputFrameSize)
-            
+                        
             if ret < 0 {
                 if ret == EOF {
                     print("FFmpeg## EOF")
