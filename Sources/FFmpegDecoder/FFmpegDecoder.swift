@@ -261,9 +261,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
             
             let ret = av_read_frame(formatCtx, pktPtr)
             
-            DispatchQueue.main.sync {
-                self.delegate?.decoder(self, didReceiveVideoSize: outputFrameSize)
-            }
+            delegate?.decoder(self, didReceiveVideoSize: outputFrameSize)
             
             if ret < 0 {
                 if ret == EOF {
