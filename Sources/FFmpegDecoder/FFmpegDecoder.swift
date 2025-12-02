@@ -193,15 +193,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if openRet < 0 {
             print("FFmpeg## avcodec_open2(video) 실패: \(openRet)")
         }
-
-        let width = codecCtx.pointee.width
-        let height = codecCtx.pointee.height
-        print("FFmpeg## 비디오 해상도: \(width)x\(height)")
-        
-        // 해상도 delegate 전달
-        let size = CGSize(width: Int(width),
-                          height: Int(height))
-        delegate?.decoder(self, didReceiveVideoSize: size)
     }
     
     private func prepareAudioDecoder() {
@@ -269,6 +260,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
         while !decodingStopped {
             
             let ret = av_read_frame(formatCtx, pktPtr)
+            
+            DispatchQueue.main.sync {
+                self.delegate?.decoder(self, didReceiveVideoSize: outputFrameSize)
+            }
             
             if ret < 0 {
                 if ret == EOF {
@@ -405,8 +400,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     // MARK: - Draw Image
     private func drawImage() {
-        guard let vFrame = vFrame,
-              let videoCodecCtx = videoCodecCtx else { return }
+        guard let vFrame = vFrame else { return }
 
         let srcWidth = Int(vFrame.pointee.width)
         let srcHeight = Int(vFrame.pointee.height)
