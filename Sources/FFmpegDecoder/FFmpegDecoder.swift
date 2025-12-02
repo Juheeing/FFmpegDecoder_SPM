@@ -91,7 +91,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         // 파일 열기
         var options: OpaquePointer? = nil
         av_dict_set(&options, "rtsp_transport", "tcp", 0)
-        av_dict_set(&options, "max_delay", "500000", 0)
 
         let openResult = avformat_open_input(&fmtCtx, url, nil, &options)
         if openResult != 0 {
@@ -537,16 +536,103 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
 
     // MARK: - Draw Audio
-    func drawAudio() {
+    private func drawAudio() {
+        guard let aFrame = aFrame?.pointee,
+              let audioCodecCtx = audioCodecCtx?.pointee else { return }
+        
+        // AudioEngine 준비
+        if engine == nil {
+            setupAudioEngine()
+        }
+        guard let engine, let player else { return }
 
+        let sampleRate = Double(audioCodecCtx.sample_rate)
+        let channels = Int(audioCodecCtx.ch_layout.nb_channels)
+        let frameCount = AVAudioFrameCount(aFrame.nb_samples)
+
+        // sample format
+        let sampleFormat = audioCodecCtx.sample_fmt
+        let isPlanar = av_sample_fmt_is_planar(sampleFormat) != 0
+        let bytesPerSample = av_get_bytes_per_sample(sampleFormat)
+
+        // AVAudioFormat 생성
+        guard let audioFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sampleRate,
+            channels: AVAudioChannelCount(channels),
+            interleaved: false
+        ) else {
+            print("FFmpeg## audioFormat 생성 실패")
+            return
+        }
+
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: audioFormat, frameCapacity: frameCount) else {
+            print("FFmpeg## AVAudioPCMBuffer 생성 실패")
+            return
+        }
+        buffer.frameLength = frameCount
+
+        // FFmpeg → Float32 변환
+        for ch in 0..<channels {
+            let outPtr = buffer.floatChannelData![ch]
+            
+            if isPlanar {
+                guard let inPtr = frameDataPointer(aFrame, channel: ch) else { continue }
+                memcpy(outPtr, inPtr, Int(frameCount) * Int(bytesPerSample))
+            } else {
+                guard let basePtr = frameDataPointer(aFrame, channel: 0) else { return }
+
+                let inPtr = UnsafeMutableRawPointer(basePtr)
+                    .assumingMemoryBound(to: Float.self)
+                
+                for i in 0..<Int(frameCount) {
+                    outPtr[i] = inPtr[i * channels + ch]
+                }
+            }
+        }
+
+        // 재생
+        player.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
+
+        if !engine.isRunning {
+            do {
+                try engine.start()
+            } catch {
+                print("FFmpeg## engine.start 실패: \(error)")
+            }
+        }
     }
+    
+    private func setupAudioEngine() {
+        engine = AVAudioEngine()
+        player = AVAudioPlayerNode()
 
-    func playAudioFrame(_ frame: UnsafeMutablePointer<AVFrame>) -> Data {
-        let bytesPerSample = Int(av_get_bytes_per_sample(audioCodecCtx!.pointee.sample_fmt))
-        let channels = Int(audioCodecCtx!.pointee.ch_layout.nb_channels)
-        let count = bytesPerSample * channels * Int(frame.pointee.nb_samples)
+        guard let engine, let player else { return }
 
-        return Data(bytes: frame.pointee.data.0!, count: count)
+        engine.attach(player)
+
+        let output = engine.mainMixerNode
+        engine.connect(player, to: output, format: output.outputFormat(forBus: 0))
+
+        do {
+            try engine.start()
+        } catch {
+            print("FFmpeg## AudioEngine start 실패: \(error)")
+        }
+    }
+    
+    private func frameDataPointer(_ frame: AVFrame, channel: Int) -> UnsafeMutablePointer<UInt8>? {
+        switch channel {
+        case 0: return frame.data.0
+        case 1: return frame.data.1
+        case 2: return frame.data.2
+        case 3: return frame.data.3
+        case 4: return frame.data.4
+        case 5: return frame.data.5
+        case 6: return frame.data.6
+        case 7: return frame.data.7
+        default: return nil
+        }
     }
 
     // MARK: - Utility
