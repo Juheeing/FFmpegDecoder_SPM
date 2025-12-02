@@ -171,6 +171,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         let stream = formatCtx.pointee.streams[Int(videoStreamIndex)]
         let codecPar = stream?.pointee.codecpar
+        videoStream = stream
 
         guard let codec = avcodec_find_decoder(codecPar?.pointee.codec_id ?? AV_CODEC_ID_NONE) else {
             print("FFmpeg## 지원하지 않는 video codec: \(String(describing: codecPar?.pointee.codec_id.rawValue))")
@@ -207,6 +208,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         let stream = formatCtx.pointee.streams[Int(audioStreamIndex)]
         let codecPar = stream?.pointee.codecpar
+        audioStream = stream
 
         guard let codec = avcodec_find_decoder(codecPar?.pointee.codec_id ?? AV_CODEC_ID_NONE) else {
             print("FFmpeg## 지원하지 않는 audio codec: \(String(describing: codecPar?.pointee.codec_id.rawValue))")
