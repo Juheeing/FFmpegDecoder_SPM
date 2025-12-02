@@ -377,7 +377,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
     func getCurrentTime(frame: UnsafeMutablePointer<AVFrame>?,
                         stream: UnsafeMutablePointer<AVStream>?) {
 
-        guard let frame = frame, let stream = stream else { return }
+        guard let frame = frame else { return }
+
+        let streamRef = stream ?? videoStream
+        guard let stream = streamRef else { return }
         
         let AV_NOPTS_VALUE: Int64 = Int64.min
         var pts = frame.pointee.best_effort_timestamp
