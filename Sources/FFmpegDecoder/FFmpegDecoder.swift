@@ -396,10 +396,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
         }
         
         let ms = av_rescale_q(pts, stream.pointee.time_base, AVRational(num: 1, den: 1000))
-        currentTimeMs = Int64(ms)
+        let seconds = Double(ms) / 1000.0
         
         DispatchQueue.main.sync {
-            self.delegate?.decoder(self, didUpdateCurrentTime: self.currentTimeMs, duration: self.durationMs)
+            self.delegate?.decoder(self, didUpdateCurrentTime: Int64(seconds), duration: self.durationMs / 1000)
         }
     }
 
