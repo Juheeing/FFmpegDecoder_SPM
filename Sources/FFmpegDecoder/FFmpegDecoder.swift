@@ -8,7 +8,7 @@ import CoreImage
 import FFmpegHeaders
 
 // MARK: - Public types
-
+@objc
 public enum FFmpegDecoderState: Int {
     case initialized = 0, preparing, readyToPlay, buffering, bufferFinished, paused, playedToTheEnd, error, stop
 }
