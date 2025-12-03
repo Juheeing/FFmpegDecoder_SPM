@@ -63,6 +63,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - Audio
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
+    private var audioSampleRate: Double = 0
+    private var audioChannels: Int = 0
 
     // MARK: - Pause Condition
     private let pauseCondition = NSCondition()
@@ -229,10 +231,16 @@ public final class FFmpegDecoder: @unchecked Sendable {
             return
         }
 
-        print("FFmpeg## sample rate: \(codecCtx.pointee.sample_rate)")
-        print("FFmpeg## channels: \(codecCtx.pointee.ch_layout.nb_channels)")
+        let rate = codecCtx.pointee.sample_rate
+        let channels = codecCtx.pointee.ch_layout.nb_channels
+        
+        print("FFmpeg## sample rate: \(rate)")
+        print("FFmpeg## channels: \(channels)")
         print("FFmpeg## channel layout: \(codecCtx.pointee.ch_layout)")
         print("FFmpeg## sample format: \(codecCtx.pointee.sample_fmt.rawValue)")
+        
+        audioSampleRate = Double(rate)
+        audioChannels = Int(channels)
 
     }
     
@@ -542,7 +550,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         // AudioEngine 준비
         if engine == nil {
-            setupAudioEngine()
+            setupAudioEngine(sampleRate: audioSampleRate, channels: audioChannels)
         }
         guard let engine, let player else { return }
 
@@ -603,7 +611,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         }
     }
     
-    private func setupAudioEngine() {
+    private func setupAudioEngine(sampleRate: Double, channels: Int) {
         engine = AVAudioEngine()
         player = AVAudioPlayerNode()
 
@@ -611,8 +619,18 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         engine.attach(player)
 
-        let output = engine.mainMixerNode
-        engine.connect(player, to: output, format: output.outputFormat(forBus: 0))
+        // FFmpeg 오디오 정보 기반으로 AVAudioFormat 생성
+        let inputFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sampleRate,
+            channels: AVAudioChannelCount(channels),
+            interleaved: false
+        )!
+
+        let mixer = engine.mainMixerNode
+
+        // Player → Mixer 연결
+        engine.connect(player, to: mixer, format: inputFormat)
 
         do {
             try engine.start()
