@@ -553,7 +553,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         // AudioEngine 준비
         if engine == nil {
-            print("FFmpeg## setupAudioEngine 호출 — sampleRate=\(audioSampleRate), channels=\(audioChannels)")
             setupAudioEngine(sampleRate: audioSampleRate, channels: audioChannels)
         }
         guard let engine, let player else {
@@ -602,19 +601,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
             let outPtr = buffer.floatChannelData![ch]
             
             if isPlanar {
-                print("FFmpeg## Planar 채널 \(ch) 복사 시작")
-                guard let inPtr = frameDataPointer(aFrame, channel: ch) else {
-                    print("FFmpeg## frameDataPointer nil for channel \(ch)")
-                    continue
-                }
+                guard let inPtr = frameDataPointer(aFrame, channel: ch) else { continue }
                 memcpy(outPtr, inPtr, Int(frameCount) * Int(bytesPerSample))
-                print("FFmpeg## Planar 채널 \(ch) 복사 완료")
             } else {
-                print("FFmpeg## Interleaved 처리 시작")
-                guard let basePtr = frameDataPointer(aFrame, channel: 0) else {
-                    print("FFmpeg## frameDataPointer base nil")
-                    return
-                }
+                guard let basePtr = frameDataPointer(aFrame, channel: 0) else { return }
 
                 let inPtr = UnsafeMutableRawPointer(basePtr)
                     .assumingMemoryBound(to: Float.self)
@@ -622,36 +612,25 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 for i in 0..<Int(frameCount) {
                     outPtr[i] = inPtr[i * channels + ch]
                 }
-                print("FFmpeg## Interleaved 채널 \(ch) 변환 완료")
             }
         }
 
-        // 재생
-        print("FFmpeg## Buffer 재생 예약")
-
-        player.scheduleBuffer(buffer, at: nil, options: [], completionHandler: {
-            print("FFmpeg## Buffer 재생 완료")
-        })
+        player.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
 
         if !engine.isRunning {
-            print("FFmpeg## engine.start() 호출")
             do {
                 try engine.start()
-                print("FFmpeg## engine.start OK")
             } catch {
                 print("FFmpeg## engine.start 실패: \(error)")
             }
         }
 
         if !player.isPlaying {
-            print("FFmpeg## player.play() 호출")
             player.play()
         }
     }
     
     private func setupAudioEngine(sampleRate: Double, channels: Int) {
-        print("FFmpeg## setupAudioEngine: sampleRate=\(sampleRate), channels=\(channels)")
-        
         engine = AVAudioEngine()
         player = AVAudioPlayerNode()
 
@@ -694,7 +673,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         ]
 
         let p = ptr.indices.contains(channel) ? ptr[channel] : nil
-        print("FFmpeg## frameDataPointer(\(channel)) → \(String(describing: p))")
         return p
     }
 
