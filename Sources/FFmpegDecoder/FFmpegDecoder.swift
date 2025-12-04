@@ -756,7 +756,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
         print("FFmpeg## Resume")
     }
     
-    func stopDecoding() {
+    public func isPlaying() -> Bool {
+        !isPaused
+    }
+    
+    public func stopDecoding() {
         decodingStopped = true
     }
 
