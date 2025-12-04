@@ -282,6 +282,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
         while !decodingStopped {
 
             if isPaused {
+                
+                if state != .paused { state = .paused }
+
                 let ret = av_read_frame(formatCtx, pktPtr)
                 if ret >= 0 {
                     av_packet_unref(pktPtr)
