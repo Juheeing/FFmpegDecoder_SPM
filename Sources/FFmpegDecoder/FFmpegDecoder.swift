@@ -8,6 +8,7 @@ import CoreImage
 import FFmpegHeaders
 
 // MARK: - Public types
+
 @objc
 public enum FFmpegDecoderState: Int {
     case initialized = 0, preparing, readyToPlay, buffering, bufferFinished, paused, playedToTheEnd, error, stop
@@ -77,6 +78,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
 
     // MARK: - Open File
+    
     public func open(url: String) {
         state = .preparing
 
@@ -166,6 +168,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
         decoding()
     }
     
+    // MARK: - Check Codec
+    
     private func prepareVideoDecoder() {
         guard let formatCtx else { return }
 
@@ -244,6 +248,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     }
     
+    // MARK: - Decoding Loop
+    
     func decoding() {
 
         if state != .preparing { state = .preparing }
@@ -270,6 +276,13 @@ public final class FFmpegDecoder: @unchecked Sendable {
         }
         
         while !decodingStopped {
+            
+            pauseCondition.lock()
+            while isPaused && !decodingStopped {
+                if state != .paused { state = .paused }
+                pauseCondition.wait()
+            }
+            pauseCondition.unlock()
             
             let ret = av_read_frame(formatCtx, pktPtr)
                         
@@ -320,7 +333,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
         clear()
     }
 
-    // MARK: - Read Frame
+    // MARK: - FFmpeg Functions
+    
     func readFrame(packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
         guard let fmt = formatCtx else { return -1 }
 
@@ -349,7 +363,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         return avcodec_receive_frame(ctx, frame)
     }
 
-    // MARK: - Play / Pause
     func readPlay() -> Int32 {
         guard let fmt = formatCtx else { return -1 }
 
@@ -382,6 +395,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
 
     // MARK: - Get Current Time
+    
     func getCurrentTime(frame: UnsafeMutablePointer<AVFrame>?,
                         stream: UnsafeMutablePointer<AVStream>?) {
 
@@ -410,6 +424,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
 
     // MARK: - Draw Image
+    
     private func drawImage() {
         guard let vFrame = vFrame else { return }
 
@@ -544,6 +559,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
 
     // MARK: - Draw Audio
+    
     private func drawAudio() {
         guard let aFrame = aFrame?.pointee,
               let audioCodecCtx = audioCodecCtx?.pointee else {
@@ -677,6 +693,42 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
 
     // MARK: - Utility
+    
+    public func pause() {
+        isPaused = true
+        isPlaying = false
+        
+        // FFmpeg 입력 일시정지
+        _ = readPause()
+
+        // 오디오 정지
+        player?.pause()
+        engine?.pause()
+
+        print("FFmpeg## Pause")
+    }
+
+    public func resume() {
+        isPaused = false
+        isPlaying = true
+        
+        // FFmpeg 입력 재개
+        _ = readPlay()
+
+        // 오디오 재생
+        if engine?.isRunning == false {
+            try? engine?.start()
+        }
+        player?.play()
+
+        // 기다리는 디코딩 스레드 깨움
+        pauseCondition.lock()
+        pauseCondition.signal()
+        pauseCondition.unlock()
+
+        print("FFmpeg## Resume")
+    }
+    
     func stopDecoding() {
         decodingStopped = true
     }
