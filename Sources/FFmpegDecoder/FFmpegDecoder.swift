@@ -54,7 +54,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - State
     private var decodingStopped = false
     private var isPaused = false
-    private var isPlaying = false
 
     // MARK: - Video Convert
     private var swsCtx: OpaquePointer?
@@ -366,7 +365,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
     func readPlay() -> Int32 {
         guard let fmt = formatCtx else { return -1 }
 
-        isPlaying = true
         let ret = av_read_play(fmt)
 
         if ret >= 0 {
@@ -381,7 +379,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
     func readPause() -> Int32 {
         guard let fmt = formatCtx else { return -1 }
 
-        isPlaying = false
         let ret = av_read_pause(fmt)
 
         if ret >= 0 {
@@ -696,7 +693,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
     public func pause() {
         isPaused = true
-        isPlaying = false
         
         // FFmpeg 입력 일시정지
         _ = readPause()
@@ -710,7 +706,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     public func resume() {
         isPaused = false
-        isPlaying = true
         
         // FFmpeg 입력 재개
         _ = readPlay()
@@ -729,8 +724,12 @@ public final class FFmpegDecoder: @unchecked Sendable {
         print("FFmpeg## Resume")
     }
     
-    func stopDecoding() {
+    public func stopDecoding() {
         decodingStopped = true
+    }
+    
+    public func isPlaying() -> Bool {
+        !isPaused
     }
 
     func clear() {
