@@ -263,7 +263,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
             while isPaused && !decodingStopped {
                 pauseCondition.wait()
             }
+            let stopNow = decodingStopped
             pauseCondition.unlock()
+            
+            if stopNow { break }
             
             while readFrame(packet: pktPtr) >= 0 && !decodingStopped {
                 
@@ -680,14 +683,16 @@ public final class FFmpegDecoder: @unchecked Sendable {
         controlQueue.async { [weak self] in
             guard let self = self else { return }
             
+            self.pauseCondition.lock()
             self.isPaused = true
-            
-            // FFmpeg 입력 일시정지
-            _ = readPause()
-            
-            // 오디오 정지
+
+            _ = self.readPause()
+
             self.player?.pause()
             self.engine?.pause()
+
+            self.pauseCondition.signal()
+            self.pauseCondition.unlock()
         }
         print("FFmpeg## Pause")
     }
@@ -696,19 +701,17 @@ public final class FFmpegDecoder: @unchecked Sendable {
         controlQueue.async { [weak self] in
             guard let self = self else { return }
             
+            self.pauseCondition.lock()
             self.isPaused = false
-            
-            // FFmpeg 입력 재개
-            _ = readPlay()
-            
-            // 오디오 재생
+
+            _ = self.readPlay()
+
             if self.engine?.isRunning == false {
                 try? self.engine?.start()
             }
             self.player?.play()
-            
-            // 기다리는 디코딩 스레드 깨움
-            self.pauseCondition.lock()
+
+
             self.pauseCondition.signal()
             self.pauseCondition.unlock()
         }
@@ -719,7 +722,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         controlQueue.async { [weak self] in
             guard let self = self else { return }
             
-            // 요청 플래그
             self.pauseCondition.lock()
             self.decodingStopped = true
             self.pauseCondition.signal()
