@@ -258,15 +258,25 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         while !decodingStopped {
             
+            _ = readFrame(packet: pktPtr)
+            
             pauseCondition.lock()
             while isPaused && !decodingStopped {
+                _ = readPause()
+                player?.pause()
+                engine?.pause()
                 if state != .paused { state = .paused }
                 pauseCondition.wait()
             }
             pauseCondition.unlock()
             
-            _ = readFrame(packet: pktPtr)
-
+            if !isPlaying() {
+                _ = readPlay()
+                if state != .readyToPlay { state = .readyToPlay }
+            }
+            
+            if state != .readyToPlay { state = .readyToPlay }
+            
             let streamIndex = pktPtr.pointee.stream_index
 
             if streamIndex == videoStreamIndex {
@@ -672,40 +682,31 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - Utility
     
     public func pause() {
-        isPaused = true
-        
-        // FFmpeg 입력 일시정지
-        _ = readPause()
-
-        // 오디오 정지
-        player?.pause()
-        engine?.pause()
-
+        decodeQueue.async {
+            self.pauseCondition.lock()
+            self.isPaused = true
+            self.pauseCondition.unlock()
+        }
         print("FFmpeg## Pause")
     }
 
     public func resume() {
-        isPaused = false
-        
-        // FFmpeg 입력 재개
-        _ = readPlay()
-
-        // 오디오 재생
-        if engine?.isRunning == false {
-            try? engine?.start()
+        decodeQueue.async {
+            self.pauseCondition.lock()
+            self.isPaused = false
+            self.pauseCondition.signal()
+            self.pauseCondition.unlock()
         }
-        player?.play()
-
-        // 기다리는 디코딩 스레드 깨움
-        pauseCondition.lock()
-        pauseCondition.signal()
-        pauseCondition.unlock()
-
         print("FFmpeg## Resume")
     }
     
     public func stopDecoding() {
-        decodingStopped = true
+        decodeQueue.async {
+            self.pauseCondition.lock()
+            self.decodingStopped = true
+            self.pauseCondition.signal()
+            self.pauseCondition.unlock()
+        }
     }
     
     public func isPlaying() -> Bool {
