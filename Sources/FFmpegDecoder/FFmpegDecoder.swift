@@ -70,6 +70,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     // 디코딩 스레드
     private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
+    private let controlQueue = DispatchQueue(label: "ffmpeg.control.queue")
     
     public init() {
         avformat_network_init()
@@ -245,7 +246,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - Decoding Loop
     
     func decoding() {
-
         pktPtr = av_packet_alloc()
         vFrame = av_frame_alloc()
         aFrame = av_frame_alloc()
@@ -257,70 +257,71 @@ public final class FFmpegDecoder: @unchecked Sendable {
         }
         
         while !decodingStopped {
+
+            pauseCondition.lock()
+            
+            while isPaused && !decodingStopped {
+                pauseCondition.wait()
+            }
+            pauseCondition.unlock()
+            
+            if decodingStopped { break }
             
             while readFrame(packet: pktPtr) >= 0 && !decodingStopped {
-                
+
                 pauseCondition.lock()
-                
-                while isPaused && !decodingStopped {
-                    
-                    _ = readPause()
-                    
-                    player?.pause()
-                    engine?.pause()
-                    
-                    if state != .paused { state = .paused }
-                    
-                    pauseCondition.wait()
-                }
-                
+                let shouldPauseNow = isPaused
                 pauseCondition.unlock()
-                                        
-                if !isPlaying() {
-                    _ = readPlay()
-                    if state != .readyToPlay { state = .readyToPlay }
-                }
                 
-                if state != .readyToPlay { state = .readyToPlay }
+                if shouldPauseNow {
+                    av_packet_unref(pktPtr)
+                    break
+                }
                 
                 let streamIndex = pktPtr.pointee.stream_index
 
                 if streamIndex == videoStreamIndex {
-
                     let sendRet = sendPacket(ctx: videoCodecCtx, packet: pktPtr)
-
                     if sendRet >= 0 {
                         while true {
                             let recvRet = receiveFrame(ctx: videoCodecCtx, frame: vFrame)
-                            
                             if recvRet < 0 { break }
-                            
                             getCurrentTime(frame: vFrame, stream: videoStream)
                             drawImage()
+                            
+                            pauseCondition.lock()
+                            let paused = isPaused
+                            pauseCondition.unlock()
+                            if paused { break }
                         }
                     }
                 } else if streamIndex == audioStreamIndex {
-
                     let sendRet = sendPacket(ctx: audioCodecCtx, packet: pktPtr)
-
                     if sendRet >= 0 {
                         while true {
                             let recvRet = receiveFrame(ctx: audioCodecCtx, frame: aFrame)
-
                             if recvRet < 0 { break }
-
                             drawAudio()
+                            
+                            pauseCondition.lock()
+                            let paused = isPaused
+                            pauseCondition.unlock()
+                            if paused { break }
                         }
                     }
                 }
 
                 av_packet_unref(pktPtr)
+                
+                pauseCondition.lock()
+                let pausedAfterPacket = isPaused
+                pauseCondition.unlock()
+                if pausedAfterPacket { break }
             }
-
         }
         clear()
     }
-
+    
     // MARK: - FFmpeg Functions
     
     func readFrame(packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
@@ -690,31 +691,74 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - Utility
     
     public func pause() {
-        decodeQueue.async {
+        controlQueue.async { [weak self] in
+            guard let self = self else { return }
+
+            let ret = readPause()
+            if ret < 0 {
+                print("FFmpeg## av_read_pause error: \(ret)")
+            } else {
+                print("FFmpeg## av_read_pause success")
+            }
+            
             self.pauseCondition.lock()
             self.isPaused = true
+            self.player?.pause()
+            self.engine?.pause()
+
+            if self.state != .paused { self.state = .paused }
             self.pauseCondition.unlock()
         }
-        print("FFmpeg## Pause")
+        print("FFmpeg## Pause requested")
     }
 
     public func resume() {
-        decodeQueue.async {
+        controlQueue.async { [weak self] in
+            guard let self = self else { return }
+            let ret = readPlay()
+            if ret < 0 {
+                print("FFmpeg## av_read_play error: \(ret)")
+                self.state = .error
+            } else {
+                print("FFmpeg## av_read_play success")
+            }
+            
             self.pauseCondition.lock()
+            let wasPaused = self.isPaused
             self.isPaused = false
-            self.pauseCondition.signal()
+            
+            if let engine = self.engine, let player = self.player {
+                if !engine.isRunning {
+                    do {
+                        try engine.start()
+                    } catch {
+                        print("FFmpeg## AVAudioEngine start error: \(error)")
+                    }
+                }
+                player.play()
+            }
+            
+            if wasPaused {
+                self.pauseCondition.signal()
+            }
+            
+            if self.state != .readyToPlay { self.state = .readyToPlay }
             self.pauseCondition.unlock()
         }
-        print("FFmpeg## Resume")
+        print("FFmpeg## Resume requested")
     }
     
     public func stopDecoding() {
-        decodeQueue.async {
+        controlQueue.async { [weak self] in
+            guard let self = self else { return }
+            
+            // 요청 플래그
             self.pauseCondition.lock()
             self.decodingStopped = true
             self.pauseCondition.signal()
             self.pauseCondition.unlock()
         }
+        print("FFmpeg## stopDecoding requested")
     }
     
     public func isPlaying() -> Bool {
