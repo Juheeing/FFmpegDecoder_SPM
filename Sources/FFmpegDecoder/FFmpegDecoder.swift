@@ -259,14 +259,13 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         while !decodingStopped {
             
+            pauseCondition.lock()
+            while isPaused && !decodingStopped {
+                pauseCondition.wait()
+            }
+            pauseCondition.unlock()
+            
             while readFrame(packet: pktPtr) >= 0 && !decodingStopped {
-                
-                pauseCondition.lock()
-                while isPaused && !decodingStopped {
-                    if state != .paused { state = .paused }
-                    pauseCondition.wait()
-                }
-                pauseCondition.unlock()
                 
                 if state != .readyToPlay { state = .readyToPlay }
                 
