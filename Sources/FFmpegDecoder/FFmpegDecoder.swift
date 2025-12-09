@@ -152,11 +152,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         // 비디오 오디오 디코더 준비
         prepareVideoDecoder()
-    
         if audioStreamIndex != -1 {
             prepareAudioDecoder()
         }
-        
+
         print("FFmpeg## 디코딩 준비 완료 → readyToPlay")
         state = .readyToPlay
         
@@ -251,37 +250,29 @@ public final class FFmpegDecoder: @unchecked Sendable {
         vFrame = av_frame_alloc()
         aFrame = av_frame_alloc()
         
-        guard let pktPtr = pktPtr else {
+        guard let pktPtr = pktPtr, vFrame != nil else {
             print("FFmpeg## alloc fail")
             stopDecoding()
             return
         }
+
+        guard let videoCodecCtx = videoCodecCtx else {
+            print("FFmpeg## videoCodecCtx nil")
+            stopDecoding();
+            return
+        }
         
         while !decodingStopped {
-                        
-            let ret = readFrame(packet: pktPtr)
             
             pauseCondition.lock()
-            
             while isPaused && !decodingStopped {
                 if state != .paused { state = .paused }
-                _ = readPause()
-                player?.pause()
-                engine?.pause()
                 pauseCondition.wait()
             }
-            
             pauseCondition.unlock()
             
-            if !isPlaying() {
-                if state != .readyToPlay { state = .readyToPlay }
-                _ = readPlay()
-                if engine?.isRunning == false {
-                    try? engine?.start()
-                }
-                player?.play()
-            }
-            
+            let ret = readFrame(packet: pktPtr)
+
             if ret < 0 {
                 if ret == EOF {
                     print("FFmpeg## EOF")
@@ -297,11 +288,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
             if streamIndex == videoStreamIndex {
 
-                let sendRet = sendPacket(ctx: videoCodecCtx, packet: pktPtr)
+                let sendRet = avcodec_send_packet(videoCodecCtx, pktPtr)
 
                 if sendRet >= 0 {
                     while true {
-                        let recvRet = receiveFrame(ctx: videoCodecCtx, frame: vFrame)
+                        let recvRet = avcodec_receive_frame(videoCodecCtx, vFrame)
                         
                         if recvRet < 0 { break }
                         
@@ -311,11 +302,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 }
             } else if streamIndex == audioStreamIndex {
 
-                let sendRet = sendPacket(ctx: audioCodecCtx, packet: pktPtr)
+                let sendRet = avcodec_send_packet(audioCodecCtx, pktPtr)
 
                 if sendRet >= 0 {
                     while true {
-                        let recvRet = receiveFrame(ctx: audioCodecCtx, frame: aFrame)
+                        let recvRet = avcodec_receive_frame(audioCodecCtx, aFrame)
 
                         if recvRet < 0 { break }
 
@@ -332,62 +323,31 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - FFmpeg Functions
     
     func readFrame(packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
-        guard let fmt = formatCtx else {
-            print("FFmpeg## readFrame: formatCtx is nil")
-            return -1
-        }
+        guard let fmt = formatCtx else { return -1 }
 
         let ret = av_read_frame(fmt, packet)
-        
-        if ret < 0 {
-            if ret == EOF {
-                print("FFmpeg## readFrame: EOF reached")
-                if state != .playedToTheEnd { state = .playedToTheEnd }
-            } else {
-                print("FFmpeg## readFrame error: \(ret)")
-                if state != .error { state = .error }
-            }
+
+        if ret == EOF {
+            print("FFmpeg## readFrame EOF")
             stopDecoding()
-            
+            if state != .playedToTheEnd { state = .playedToTheEnd }
         }
+
         return ret
     }
 
     func sendPacket(ctx: UnsafeMutablePointer<AVCodecContext>?,
                     packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
 
-        guard let ctx else {
-            print("FFmpeg## sendPacket: codec context is nil")
-            return -1
-        }
-
-        let ret = avcodec_send_packet(ctx, packet)
-        
-        if ret < 0 {
-            print("FFmpeg## sendPacket error: \(ret)")
-            if state != .error { state = .error }
-            stopDecoding()
-        }
-        return ret
+        guard let ctx else { return -1 }
+        return avcodec_send_packet(ctx, packet)
     }
 
     func receiveFrame(ctx: UnsafeMutablePointer<AVCodecContext>?,
                       frame: UnsafeMutablePointer<AVFrame>?) -> Int32 {
 
-        guard let ctx else {
-            print("FFmpeg## receiveFrame: codec context is nil")
-            return -1
-        }
-
-        let ret = avcodec_receive_frame(ctx, frame)
-        
-        if ret < 0 {
-            print("FFmpeg## receiveFrame error: \(ret)")
-            if state != .error { state = .error }
-            stopDecoding()
-        }
-
-        return ret
+        guard let ctx else { return -1 }
+        return avcodec_receive_frame(ctx, frame)
     }
 
     func readPlay() -> Int32 {
@@ -710,21 +670,35 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - Utility
     
     public func pause() {
-        decodeQueue.async {
-            self.pauseCondition.lock()
-            self.isPaused = true
-            self.pauseCondition.unlock()
-        }
+        isPaused = true
+        
+        // FFmpeg 입력 일시정지
+        _ = readPause()
+
+        // 오디오 정지
+        player?.pause()
+        engine?.pause()
+
         print("FFmpeg## Pause")
     }
 
     public func resume() {
-        decodeQueue.async {
-            self.pauseCondition.lock()
-            self.isPaused = false
-            self.pauseCondition.signal()
-            self.pauseCondition.unlock()
+        isPaused = false
+        
+        // FFmpeg 입력 재개
+        _ = readPlay()
+
+        // 오디오 재생
+        if engine?.isRunning == false {
+            try? engine?.start()
         }
+        player?.play()
+
+        // 기다리는 디코딩 스레드 깨움
+        pauseCondition.lock()
+        pauseCondition.signal()
+        pauseCondition.unlock()
+
         print("FFmpeg## Resume")
     }
     
