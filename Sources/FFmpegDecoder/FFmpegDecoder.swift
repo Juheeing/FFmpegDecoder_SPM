@@ -137,12 +137,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
             state = .error
             return
         }
-        
-        if audioStreamIndex == -1 {
-            print("FFmpeg## 오디오 스트림을 찾지 못함")
-            state = .error
-            return
-        }
 
         // duration 계산
         let duration = formatCtx.pointee.duration
@@ -158,7 +152,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         // 비디오 오디오 디코더 준비
         prepareVideoDecoder()
-        prepareAudioDecoder()
+    
+        if audioStreamIndex != -1 {
+            prepareAudioDecoder()
+        }
         
         print("FFmpeg## 디코딩 준비 완료 → readyToPlay")
         state = .readyToPlay
@@ -256,27 +253,15 @@ public final class FFmpegDecoder: @unchecked Sendable {
         vFrame = av_frame_alloc()
         aFrame = av_frame_alloc()
         
-        guard pktPtr != nil, vFrame != nil, aFrame != nil else {
+        guard let pktPtr = pktPtr else {
             print("FFmpeg## alloc fail")
             stopDecoding()
             return
         }
         
-        guard formatCtx != nil else {
-            print("FFmpeg## formatCtx nil")
-            stopDecoding();
-            return
-        }
-
-        guard let videoCodecCtx = videoCodecCtx else {
-            print("FFmpeg## videoCodecCtx nil")
-            stopDecoding();
-            return
-        }
-        
         while !decodingStopped {
-            
-            let ret = readFrame(packet: pktPtr!)
+                        
+            let ret = readFrame(packet: pktPtr)
             
             pauseCondition.lock()
             
@@ -310,15 +295,15 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 break
             }
 
-            let streamIndex = pktPtr!.pointee.stream_index
+            let streamIndex = pktPtr.pointee.stream_index
 
             if streamIndex == videoStreamIndex {
 
-                let sendRet = avcodec_send_packet(videoCodecCtx, pktPtr)
+                let sendRet = sendPacket(ctx: videoCodecCtx, packet: pktPtr)
 
                 if sendRet >= 0 {
                     while true {
-                        let recvRet = avcodec_receive_frame(videoCodecCtx, vFrame)
+                        let recvRet = receiveFrame(ctx: videoCodecCtx, frame: vFrame)
                         
                         if recvRet < 0 { break }
                         
@@ -328,11 +313,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 }
             } else if streamIndex == audioStreamIndex {
 
-                let sendRet = avcodec_send_packet(audioCodecCtx, pktPtr)
+                let sendRet = sendPacket(ctx: audioCodecCtx, packet: pktPtr)
 
                 if sendRet >= 0 {
                     while true {
-                        let recvRet = avcodec_receive_frame(audioCodecCtx, aFrame)
+                        let recvRet = receiveFrame(ctx: audioCodecCtx, frame: aFrame)
 
                         if recvRet < 0 { break }
 
