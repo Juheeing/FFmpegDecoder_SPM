@@ -247,8 +247,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
     func decoding() {
 
-        if state != .preparing { state = .preparing }
-
         pktPtr = av_packet_alloc()
         vFrame = av_frame_alloc()
         aFrame = av_frame_alloc()
@@ -334,31 +332,62 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - FFmpeg Functions
     
     func readFrame(packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
-        guard let fmt = formatCtx else { return -1 }
-
-        let ret = av_read_frame(fmt, packet)
-
-        if ret == EOF {
-            print("FFmpeg## readFrame EOF")
-            stopDecoding()
-            if state != .playedToTheEnd { state = .playedToTheEnd }
+        guard let fmt = formatCtx else {
+            print("FFmpeg## readFrame: formatCtx is nil")
+            return -1
         }
 
+        let ret = av_read_frame(fmt, packet)
+        
+        if ret < 0 {
+            if ret == EOF {
+                print("FFmpeg## readFrame: EOF reached")
+                if state != .playedToTheEnd { state = .playedToTheEnd }
+            } else {
+                print("FFmpeg## readFrame error: \(ret)")
+                if state != .error { state = .error }
+            }
+            stopDecoding()
+            
+        }
         return ret
     }
 
     func sendPacket(ctx: UnsafeMutablePointer<AVCodecContext>?,
                     packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
 
-        guard let ctx else { return -1 }
-        return avcodec_send_packet(ctx, packet)
+        guard let ctx else {
+            print("FFmpeg## sendPacket: codec context is nil")
+            return -1
+        }
+
+        let ret = avcodec_send_packet(ctx, packet)
+        
+        if ret < 0 {
+            print("FFmpeg## sendPacket error: \(ret)")
+            if state != .error { state = .error }
+            stopDecoding()
+        }
+        return ret
     }
 
     func receiveFrame(ctx: UnsafeMutablePointer<AVCodecContext>?,
                       frame: UnsafeMutablePointer<AVFrame>?) -> Int32 {
 
-        guard let ctx else { return -1 }
-        return avcodec_receive_frame(ctx, frame)
+        guard let ctx else {
+            print("FFmpeg## receiveFrame: codec context is nil")
+            return -1
+        }
+
+        let ret = avcodec_receive_frame(ctx, frame)
+        
+        if ret < 0 {
+            print("FFmpeg## receiveFrame error: \(ret)")
+            if state != .error { state = .error }
+            stopDecoding()
+        }
+
+        return ret
     }
 
     func readPlay() -> Int32 {
