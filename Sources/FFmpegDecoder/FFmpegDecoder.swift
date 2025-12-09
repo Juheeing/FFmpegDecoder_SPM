@@ -250,15 +250,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
         vFrame = av_frame_alloc()
         aFrame = av_frame_alloc()
         
-        guard let pktPtr = pktPtr, vFrame != nil else {
+        guard let pktPtr = pktPtr else {
             print("FFmpeg## alloc fail")
             stopDecoding()
-            return
-        }
-
-        guard let videoCodecCtx = videoCodecCtx else {
-            print("FFmpeg## videoCodecCtx nil")
-            stopDecoding();
             return
         }
         
@@ -271,18 +265,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
             }
             pauseCondition.unlock()
             
-            let ret = readFrame(packet: pktPtr)
-
-            if ret < 0 {
-                if ret == EOF {
-                    print("FFmpeg## EOF")
-                    if state != .playedToTheEnd { state = .playedToTheEnd }
-                } else {
-                    print("FFmpeg## read error \(ret)")
-                    if state != .error { state = .error }
-                }
-                break
-            }
+            _ = readFrame(packet: pktPtr)
 
             let streamIndex = pktPtr.pointee.stream_index
 
@@ -334,11 +317,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
             if ret == EOF {
                 print("FFmpeg## readFrame: EOF reached")
                 if state != .playedToTheEnd { state = .playedToTheEnd }
+                stopDecoding()
             } else {
                 print("FFmpeg## readFrame error: \(ret)")
-                if state != .error { state = .error }
             }
-            stopDecoding()
         }
 
         return ret
@@ -356,8 +338,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         if ret < 0 {
             print("FFmpeg## sendPacket error: \(ret)")
-            if state != .error { state = .error }
-            stopDecoding()
         }
         
         return ret
@@ -375,8 +355,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         if ret < 0 {
             print("FFmpeg## receiveFrame error: \(ret)")
-            if state != .error { state = .error }
-            stopDecoding()
         }
 
         return ret
