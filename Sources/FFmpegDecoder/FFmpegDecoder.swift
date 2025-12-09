@@ -258,8 +258,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         while !decodingStopped {
             
-            _ = readFrame(packet: pktPtr)
-            
             pauseCondition.lock()
             while isPaused && !decodingStopped {
                 _ = readPause()
@@ -269,6 +267,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 pauseCondition.wait()
             }
             pauseCondition.unlock()
+            
+            if decodingStopped { break }
+            
+            _ = readFrame(packet: pktPtr)
             
             if !isPlaying() {
                 _ = readPlay()
