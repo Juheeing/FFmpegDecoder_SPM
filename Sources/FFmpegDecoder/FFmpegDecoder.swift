@@ -258,59 +258,65 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         while !decodingStopped {
             
-            pauseCondition.lock()
-            while isPaused && !decodingStopped {
-                _ = readPause()
-                player?.pause()
-                engine?.pause()
-                if state != .paused { state = .paused }
-                pauseCondition.wait()
-            }
-            pauseCondition.unlock()
-            
-            if decodingStopped { break }
-            
-            _ = readFrame(packet: pktPtr)
-            
-            if !isPlaying() {
-                _ = readPlay()
+            while readFrame(packet: pktPtr) >= 0 && !decodingStopped {
+                
+                pauseCondition.lock()
+                
+                while isPaused && !decodingStopped {
+                    
+                    _ = readPause()
+                    
+                    player?.pause()
+                    engine?.pause()
+                    
+                    if state != .paused { state = .paused }
+                    
+                    pauseCondition.wait()
+                }
+                
+                pauseCondition.unlock()
+                                        
+                if !isPlaying() {
+                    _ = readPlay()
+                    if state != .readyToPlay { state = .readyToPlay }
+                }
+                
                 if state != .readyToPlay { state = .readyToPlay }
-            }
-            
-            if state != .readyToPlay { state = .readyToPlay }
-            
-            let streamIndex = pktPtr.pointee.stream_index
+                
+                let streamIndex = pktPtr.pointee.stream_index
 
-            if streamIndex == videoStreamIndex {
+                if streamIndex == videoStreamIndex {
 
-                let sendRet = sendPacket(ctx: videoCodecCtx, packet: pktPtr)
+                    let sendRet = sendPacket(ctx: videoCodecCtx, packet: pktPtr)
 
-                if sendRet >= 0 {
-                    while true {
-                        let recvRet = receiveFrame(ctx: videoCodecCtx, frame: vFrame)
-                        
-                        if recvRet < 0 { break }
-                        
-                        getCurrentTime(frame: vFrame, stream: videoStream)
-                        drawImage()
+                    if sendRet >= 0 {
+                        while true {
+                            let recvRet = receiveFrame(ctx: videoCodecCtx, frame: vFrame)
+                            
+                            if recvRet < 0 { break }
+                            
+                            getCurrentTime(frame: vFrame, stream: videoStream)
+                            drawImage()
+                        }
+                    }
+                } else if streamIndex == audioStreamIndex {
+
+                    let sendRet = sendPacket(ctx: audioCodecCtx, packet: pktPtr)
+
+                    if sendRet >= 0 {
+                        while true {
+                            let recvRet = receiveFrame(ctx: audioCodecCtx, frame: aFrame)
+
+                            if recvRet < 0 { break }
+
+                            drawAudio()
+                        }
                     }
                 }
-            } else if streamIndex == audioStreamIndex {
 
-                let sendRet = sendPacket(ctx: audioCodecCtx, packet: pktPtr)
-
-                if sendRet >= 0 {
-                    while true {
-                        let recvRet = receiveFrame(ctx: audioCodecCtx, frame: aFrame)
-
-                        if recvRet < 0 { break }
-
-                        drawAudio()
-                    }
-                }
+                av_packet_unref(pktPtr)
             }
 
-            av_packet_unref(pktPtr)
         }
         clear()
     }
