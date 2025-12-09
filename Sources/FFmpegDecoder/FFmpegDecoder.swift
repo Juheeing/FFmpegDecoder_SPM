@@ -336,10 +336,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         let ret = avcodec_send_packet(ctx, packet)
         
-        if ret < 0 {
-            print("FFmpeg## sendPacket error: \(ret)")
-        }
-        
         return ret
     }
 
@@ -352,10 +348,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         }
 
         let ret = avcodec_receive_frame(ctx, frame)
-        
-        if ret < 0 {
-            print("FFmpeg## receiveFrame error: \(ret)")
-        }
 
         return ret
     }
@@ -721,8 +713,41 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
 
     func clear() {
-        av_frame_free(&vFrame)
-        av_frame_free(&aFrame)
-        sws_freeContext(swsCtx)
+
+        if vFrame != nil {
+            av_frame_free(&vFrame)
+        }
+        if aFrame != nil {
+            av_frame_free(&aFrame)
+        }
+
+        if videoCodecCtx != nil {
+            avcodec_free_context(&videoCodecCtx)
+        }
+        if audioCodecCtx != nil {
+            avcodec_free_context(&audioCodecCtx)
+        }
+
+        if formatCtx != nil {
+            avformat_close_input(&formatCtx)
+        }
+
+        if swsCtx != nil {
+            sws_freeContext(swsCtx)
+            swsCtx = nil
+        }
+
+        if pktPtr != nil {
+            av_packet_free(&pktPtr)
+            pktPtr = nil
+        }
+
+        player?.stop()
+        engine?.stop()
+        player = nil
+        engine = nil
+
+        print("FFmpeg## clear")
     }
+
 }
