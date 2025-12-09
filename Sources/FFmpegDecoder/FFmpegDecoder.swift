@@ -246,6 +246,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - Decoding Loop
     
     func decoding() {
+
         pktPtr = av_packet_alloc()
         vFrame = av_frame_alloc()
         aFrame = av_frame_alloc()
@@ -257,70 +258,56 @@ public final class FFmpegDecoder: @unchecked Sendable {
         }
         
         while !decodingStopped {
-
-            pauseCondition.lock()
-            
-            while isPaused && !decodingStopped {
-                pauseCondition.wait()
-            }
-            pauseCondition.unlock()
-            
-            if decodingStopped { break }
             
             while readFrame(packet: pktPtr) >= 0 && !decodingStopped {
-
+                
                 pauseCondition.lock()
-                let shouldPauseNow = isPaused
+                while isPaused && !decodingStopped {
+                    if state != .paused { state = .paused }
+                    pauseCondition.wait()
+                }
                 pauseCondition.unlock()
                 
-                if shouldPauseNow {
-                    av_packet_unref(pktPtr)
-                    break
-                }
+                if state != .readyToPlay { state = .readyToPlay }
                 
                 let streamIndex = pktPtr.pointee.stream_index
 
                 if streamIndex == videoStreamIndex {
+
                     let sendRet = sendPacket(ctx: videoCodecCtx, packet: pktPtr)
+
                     if sendRet >= 0 {
                         while true {
                             let recvRet = receiveFrame(ctx: videoCodecCtx, frame: vFrame)
+                            
                             if recvRet < 0 { break }
+                            
                             getCurrentTime(frame: vFrame, stream: videoStream)
                             drawImage()
-                            
-                            pauseCondition.lock()
-                            let paused = isPaused
-                            pauseCondition.unlock()
-                            if paused { break }
                         }
                     }
                 } else if streamIndex == audioStreamIndex {
+
                     let sendRet = sendPacket(ctx: audioCodecCtx, packet: pktPtr)
+
                     if sendRet >= 0 {
                         while true {
                             let recvRet = receiveFrame(ctx: audioCodecCtx, frame: aFrame)
+
                             if recvRet < 0 { break }
+
                             drawAudio()
-                            
-                            pauseCondition.lock()
-                            let paused = isPaused
-                            pauseCondition.unlock()
-                            if paused { break }
                         }
                     }
                 }
 
                 av_packet_unref(pktPtr)
-                
-                pauseCondition.lock()
-                let pausedAfterPacket = isPaused
-                pauseCondition.unlock()
-                if pausedAfterPacket { break }
             }
+
         }
         clear()
     }
+
     
     // MARK: - FFmpeg Functions
     
@@ -693,61 +680,42 @@ public final class FFmpegDecoder: @unchecked Sendable {
     public func pause() {
         controlQueue.async { [weak self] in
             guard let self = self else { return }
-
-            let ret = readPause()
-            if ret < 0 {
-                print("FFmpeg## av_read_pause error: \(ret)")
-            } else {
-                print("FFmpeg## av_read_pause success")
-            }
             
-            self.pauseCondition.lock()
             self.isPaused = true
+            
+            // FFmpeg 입력 일시정지
+            _ = readPause()
+            
+            // 오디오 정지
             self.player?.pause()
             self.engine?.pause()
-
-            if self.state != .paused { self.state = .paused }
-            self.pauseCondition.unlock()
         }
-        print("FFmpeg## Pause requested")
+        print("FFmpeg## Pause")
     }
 
     public func resume() {
         controlQueue.async { [weak self] in
             guard let self = self else { return }
-            let ret = readPlay()
-            if ret < 0 {
-                print("FFmpeg## av_read_play error: \(ret)")
-                self.state = .error
-            } else {
-                print("FFmpeg## av_read_play success")
-            }
             
-            self.pauseCondition.lock()
-            let wasPaused = self.isPaused
             self.isPaused = false
             
-            if let engine = self.engine, let player = self.player {
-                if !engine.isRunning {
-                    do {
-                        try engine.start()
-                    } catch {
-                        print("FFmpeg## AVAudioEngine start error: \(error)")
-                    }
-                }
-                player.play()
-            }
+            // FFmpeg 입력 재개
+            _ = readPlay()
             
-            if wasPaused {
-                self.pauseCondition.signal()
+            // 오디오 재생
+            if self.engine?.isRunning == false {
+                try? self.engine?.start()
             }
+            self.player?.play()
             
-            if self.state != .readyToPlay { self.state = .readyToPlay }
+            // 기다리는 디코딩 스레드 깨움
+            self.pauseCondition.lock()
+            self.pauseCondition.signal()
             self.pauseCondition.unlock()
         }
-        print("FFmpeg## Resume requested")
+        print("FFmpeg## Resume")
     }
-    
+
     public func stopDecoding() {
         controlQueue.async { [weak self] in
             guard let self = self else { return }
