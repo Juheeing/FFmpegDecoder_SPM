@@ -64,6 +64,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private var player: AVAudioPlayerNode?
     private var audioSampleRate: Double = 0
     private var audioChannels: Int = 0
+    
+    // MARK: - Clock
+    private var playStartTime: CFAbsoluteTime = 0
+    private var basePTS: Double = 0
+    private var currentVideoPTS: Double = 0
 
     // MARK: - Pause Condition
     private let pauseCondition = NSCondition()
@@ -284,6 +289,19 @@ public final class FFmpegDecoder: @unchecked Sendable {
                         
                         if recvRet < 0 { break }
                         
+                        let pts = vFrame!.pointee.pts
+                        guard let stream = videoStream else { break }
+                        let ptsSec = ptsToSec(pts, stream.pointee.time_base)
+
+                        currentVideoPTS = ptsSec
+
+                        let elapsed = CFAbsoluteTimeGetCurrent() - playStartTime
+                        let diff = ptsSec - basePTS - elapsed
+
+                        if diff > 0 {
+                            usleep(useconds_t(diff * 1_000_000))
+                        }
+            
                         getCurrentTime(frame: vFrame, stream: videoStream)
                         drawImage()
                     }
@@ -389,7 +407,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     // MARK: - Get Current Time
     
-    func getCurrentTime(frame: UnsafeMutablePointer<AVFrame>?,
+    private func getCurrentTime(frame: UnsafeMutablePointer<AVFrame>?,
                         stream: UnsafeMutablePointer<AVStream>?) {
 
         guard let frame = frame else { return }
@@ -414,6 +432,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
         DispatchQueue.main.sync {
             self.delegate?.decoder(self, didUpdateCurrentTime: Int64(seconds), duration: self.durationMs / 1000)
         }
+    }
+    
+    private func ptsToSec(_ pts: Int64, _ timeBase: AVRational) -> Double {
+        return Double(pts) * av_q2d(timeBase)
     }
 
     // MARK: - Draw Image
@@ -705,6 +727,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
         //_ = self.readPlay()
 
+        playStartTime = CFAbsoluteTimeGetCurrent()
+        basePTS = currentVideoPTS  // resume 시점 PTS를 기준으로 재설정
+        
         if engine?.isRunning == false {
             try? engine?.start()
         }
