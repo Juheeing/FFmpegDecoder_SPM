@@ -263,15 +263,15 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         while !decodingStopped {
             
+            if state != .readyToPlay { state = .readyToPlay }
+            
             let currentlyPaused: Bool = {
                 pauseCondition.lock()
                 let p = isPaused
                 if p {
-                    _ = readPause()
-                    if state != .paused { state = .paused }
+                    if state != .paused { _ = readPause(); state = .paused }
                 } else {
-                    _ = readPlay()
-                    if state != .readyToPlay { state = .readyToPlay }
+                    if state != .readyToPlay { _ = readPlay(); state = .readyToPlay }
                 }
                 pauseCondition.unlock()
                 return p
@@ -282,9 +282,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 av_packet_unref(pktPtr)
                 continue
             }
-            
-            if state != .readyToPlay { state = .readyToPlay }
-            
+
             let streamIndex = pktPtr.pointee.stream_index
 
             if currentlyPaused {
