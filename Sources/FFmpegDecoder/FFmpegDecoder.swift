@@ -368,7 +368,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if ret >= 0 {
             if state != .bufferFinished { state = .bufferFinished }
         } else {
-            //if state != .error { state = .error }
+            if state != .error { state = .error }
             print("FFmpeg## av_read_play error: \(ret)")
         }
         return ret
@@ -382,7 +382,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if ret >= 0 {
             if state != .paused { state = .paused }
         } else {
-            //if state != .error { state = .error }
+            if state != .error { state = .error }
             print("FFmpeg## av_read_pause error: \(ret)")
         }
 
@@ -684,7 +684,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         pauseCondition.lock()
         isPaused = true
 
-        _ = self.readPause()
+        //_ = self.readPause()
 
         player?.pause()
         engine?.pause()
@@ -698,7 +698,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         pauseCondition.lock()
         isPaused = false
 
-        _ = self.readPlay()
+        //_ = self.readPlay()
 
         if engine?.isRunning == false {
             try? engine?.start()
