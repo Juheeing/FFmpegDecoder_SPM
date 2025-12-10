@@ -66,10 +66,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private var audioChannels: Int = 0
     
     // MARK: - Clock
-    private var playStartTime: CFAbsoluteTime = 0
-    private var basePTS: Double = 0
-    private var currentVideoPTS: Double = 0
-    private var waitingForKeyframe = false
+    private var baseTime: CFTimeInterval = 0
+    private var pauseStartTime: CFTimeInterval = 0
 
     // MARK: - Pause Condition
     private let pauseCondition = NSCondition()
@@ -262,6 +260,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
             return
         }
         
+        baseTime = CACurrentMediaTime()
+        
         while !decodingStopped {
             
             let currentlyPaused: Bool = {
@@ -301,29 +301,15 @@ public final class FFmpegDecoder: @unchecked Sendable {
                         
                         if recvRet < 0 { break }
                         
-                        let pictType = vFrame!.pointee.pict_type
-                        
-                        let pts = vFrame!.pointee.pts
-                        guard let stream = videoStream else { break }
-                        let ptsSec = ptsToSec(pts, stream.pointee.time_base)
-
-                        currentVideoPTS = ptsSec
-
-                        if waitingForKeyframe {
-                            if pictType == AV_PICTURE_TYPE_I {
-                                waitingForKeyframe = false
-                                playStartTime = CFAbsoluteTimeGetCurrent()
-                                basePTS = ptsSec
-                            } else {
-                                continue
+                        if let pts = vFrame?.pointee.best_effort_timestamp {
+                            let timeBase = videoStream!.pointee.time_base
+                            let ptsSeconds = Double(pts) * av_q2d(timeBase)
+                            
+                            let current = CACurrentMediaTime()
+                            let diff = ptsSeconds - (current - baseTime)
+                            if diff > 0 {
+                                usleep(UInt32(diff * 1_000_000))
                             }
-                        }
-                        
-                        let elapsed = CFAbsoluteTimeGetCurrent() - playStartTime
-                        let diff = ptsSec - basePTS - elapsed
-
-                        if diff > 0 {
-                            usleep(useconds_t(diff * 1_000_000))
                         }
             
                         getCurrentTime(frame: vFrame, stream: videoStream)
@@ -350,6 +336,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         }
         clear()
     }
+    
 
     // MARK: - FFmpeg Functions
     
@@ -695,31 +682,34 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - Utility
     
     public func pause() {
+        if isPaused { return; }
         
         pauseCondition.lock()
         isPaused = true
-        waitingForKeyframe = true
         
         player?.pause()
         engine?.pause()
 
-        pauseCondition.signal()
+        pauseStartTime = CACurrentMediaTime()
         pauseCondition.unlock()
         
         print("FFmpeg## Pause")
     }
 
     public func resume() {
+        if !isPaused { return; }
+        
         pauseCondition.lock()
         isPaused = false
-            
-        playStartTime = CFAbsoluteTimeGetCurrent()
         
         if engine?.isRunning == false {
             try? engine?.start()
         }
         player?.play()
 
+        let pausedDuration = CACurrentMediaTime() - pauseStartTime
+        baseTime += pausedDuration
+        
         pauseCondition.signal()
         pauseCondition.unlock()
         print("FFmpeg## Resume")
