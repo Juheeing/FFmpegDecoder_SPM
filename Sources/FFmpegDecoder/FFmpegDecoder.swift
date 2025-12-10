@@ -263,8 +263,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         }
         
         while !decodingStopped {
-    
-            _ = readFrame(packet: pktPtr)
             
             pauseCondition.lock()
             while isPaused && !decodingStopped {
@@ -275,6 +273,16 @@ public final class FFmpegDecoder: @unchecked Sendable {
             pauseCondition.unlock()
             
             if stopNow { break }
+                    
+            _ = readFrame(packet: pktPtr)
+            
+            if needKeyframeAfterResume {
+                if !h264PacketContainsIDR(pktPtr) {
+                    av_packet_unref(pktPtr)
+                    continue // 다음 패킷 읽기
+                }
+                needKeyframeAfterResume = false
+            }
             
             if state != .readyToPlay { state = .readyToPlay }
             
@@ -336,6 +344,36 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         }
         clear()
+    }
+    
+    private func h264PacketContainsIDR(_ pkt: UnsafeMutablePointer<AVPacket>) -> Bool {
+        guard let dataPtr = pkt.pointee.data else { return false }
+        var data = dataPtr
+        var size = Int(pkt.pointee.size)
+
+        while size > 4 {
+            if data[0] == 0x00 && data[1] == 0x00 {
+                if data[2] == 0x01 {
+                    let nal = data.advanced(by: 3).pointee
+                    let nalType = nal & 0x1F
+                    if nalType == 5 { return true } // IDR
+                    // advance past nal
+                    data = data.advanced(by: 3)
+                    size -= 3
+                    continue
+                } else if data[2] == 0x00 && data[3] == 0x01 {
+                    let nal = data.advanced(by: 4).pointee
+                    let nalType = nal & 0x1F
+                    if nalType == 5 { return true }
+                    data = data.advanced(by: 4)
+                    size -= 4
+                    continue
+                }
+            }
+            data = data.advanced(by: 1)
+            size -= 1
+        }
+        return false
     }
 
     // MARK: - FFmpeg Functions
