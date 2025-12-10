@@ -260,6 +260,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
             
             pauseCondition.lock()
             while isPaused && !decodingStopped {
+                if state != .paused { state = .paused }
                 pauseCondition.wait()
             }
             let stopNow = decodingStopped
