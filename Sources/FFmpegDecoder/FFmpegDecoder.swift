@@ -70,7 +70,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     // 디코딩 스레드
     private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
-    private let controlQueue = DispatchQueue(label: "ffmpeg.control.queue")
     
     public init() {
         avformat_network_init()
@@ -680,53 +679,41 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - Utility
     
     public func pause() {
-        controlQueue.async { [weak self] in
-            guard let self = self else { return }
-            
-            self.pauseCondition.lock()
-            self.isPaused = true
+        
+        pauseCondition.lock()
+        isPaused = true
 
-            _ = self.readPause()
+        _ = self.readPause()
 
-            self.player?.pause()
-            self.engine?.pause()
+        player?.pause()
+        engine?.pause()
 
-            self.pauseCondition.signal()
-            self.pauseCondition.unlock()
-        }
+        pauseCondition.unlock()
+        
         print("FFmpeg## Pause")
     }
 
     public func resume() {
-        controlQueue.async { [weak self] in
-            guard let self = self else { return }
-            
-            self.pauseCondition.lock()
-            self.isPaused = false
+        pauseCondition.lock()
+        isPaused = false
 
-            _ = self.readPlay()
+        _ = self.readPlay()
 
-            if self.engine?.isRunning == false {
-                try? self.engine?.start()
-            }
-            self.player?.play()
-
-
-            self.pauseCondition.signal()
-            self.pauseCondition.unlock()
+        if engine?.isRunning == false {
+            try? engine?.start()
         }
+        player?.play()
+
+        pauseCondition.signal()
+        pauseCondition.unlock()
         print("FFmpeg## Resume")
     }
 
     public func stopDecoding() {
-        controlQueue.async { [weak self] in
-            guard let self = self else { return }
-            
-            self.pauseCondition.lock()
-            self.decodingStopped = true
-            self.pauseCondition.signal()
-            self.pauseCondition.unlock()
-        }
+        pauseCondition.lock()
+        decodingStopped = true
+        pauseCondition.signal()
+        pauseCondition.unlock()
         print("FFmpeg## stopDecoding requested")
     }
     
