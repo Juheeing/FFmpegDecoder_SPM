@@ -66,9 +66,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private var audioChannels: Int = 0
     
     // MARK: - Clock
-    /*private var playStartTime: CFAbsoluteTime = 0
+    private var playStartTime: CFAbsoluteTime = 0
     private var basePTS: Double = 0
-    private var currentVideoPTS: Double = 0*/
+    private var currentVideoPTS: Double = 0
+    private var waitingForKeyframe = false
 
     // MARK: - Pause Condition
     private let pauseCondition = NSCondition()
@@ -295,14 +296,24 @@ public final class FFmpegDecoder: @unchecked Sendable {
                         guard let stream = videoStream else { break }
                         let ptsSec = ptsToSec(pts, stream.pointee.time_base)
 
-                        /*currentVideoPTS = ptsSec
+                        currentVideoPTS = ptsSec
 
+                        if waitingForKeyframe {
+                            if pictType == AV_PICTURE_TYPE_I {
+                                waitingForKeyframe = false
+                                playStartTime = CFAbsoluteTimeGetCurrent()
+                                basePTS = ptsSec
+                            } else {
+                                continue
+                            }
+                        }
+                        
                         let elapsed = CFAbsoluteTimeGetCurrent() - playStartTime
                         let diff = ptsSec - basePTS - elapsed
 
                         if diff > 0 {
                             usleep(useconds_t(diff * 1_000_000))
-                        }*/
+                        }
             
                         getCurrentTime(frame: vFrame, stream: videoStream)
                         drawImage()
@@ -706,7 +717,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         pauseCondition.lock()
         isPaused = true
-
+        waitingForKeyframe = true
+        
         player?.pause()
         engine?.pause()
 
@@ -726,8 +738,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
             avcodec_flush_buffers(actx)
         }
             
-//        playStartTime = CFAbsoluteTimeGetCurrent()
-//        basePTS = currentVideoPTS  
+        playStartTime = CFAbsoluteTimeGetCurrent()
+        basePTS = currentVideoPTS  // resume 시점 PTS를 기준으로 재설정
         
         if engine?.isRunning == false {
             try? engine?.start()
