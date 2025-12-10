@@ -696,6 +696,13 @@ public final class FFmpegDecoder: @unchecked Sendable {
         pauseCondition.lock()
         isPaused = false
 
+        if let vctx = videoCodecCtx {
+            avcodec_flush_buffers(vctx)
+        }
+        if let actx = audioCodecCtx {
+            avcodec_flush_buffers(actx)
+        }
+    
         //_ = self.readPlay()
 
         if engine?.isRunning == false {
