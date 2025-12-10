@@ -264,15 +264,18 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         while !decodingStopped {
             
-            pauseCondition.lock()
-            let currentlyPaused = isPaused
-            if currentlyPaused {
-                if state != .paused { state = .paused }
-            } else {
-                if state != .readyToPlay { state = .readyToPlay }
-            }
-            pauseCondition.unlock()
-                    
+            let currentlyPaused: Bool = {
+                pauseCondition.lock()
+                let p = isPaused
+                if p {
+                    if state != .paused { state = .paused }
+                } else {
+                    if state != .readyToPlay { state = .readyToPlay }
+                }
+                pauseCondition.unlock()
+                return p
+            }()
+    
             let readRet = readFrame(packet: pktPtr)
             if readRet < 0 {
                 av_packet_unref(pktPtr)
@@ -287,7 +290,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 av_packet_unref(pktPtr)
                 continue
             }
-            
+    
             if streamIndex == videoStreamIndex {
 
                 let sendRet = sendPacket(ctx: videoCodecCtx, packet: pktPtr)
@@ -298,7 +301,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
                         
                         if recvRet < 0 { break }
                         
-                        /*let pictType = vFrame!.pointee.pict_type
+                        let pictType = vFrame!.pointee.pict_type
                         
                         let pts = vFrame!.pointee.pts
                         guard let stream = videoStream else { break }
@@ -321,7 +324,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
                         if diff > 0 {
                             usleep(useconds_t(diff * 1_000_000))
-                        }*/
+                        }
             
                         getCurrentTime(frame: vFrame, stream: videoStream)
                         drawImage()
@@ -393,35 +396,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         }
 
         let ret = avcodec_receive_frame(ctx, frame)
-
-        return ret
-    }
-    
-    func readPlay() -> Int32 {
-        guard let fmt = formatCtx else { return -1 }
-
-        let ret = av_read_play(fmt)
-
-        if ret >= 0 {
-            if state != .bufferFinished { state = .bufferFinished }
-        } else {
-            //if state != .error { state = .error }
-            print("FFmpeg## av_read_play error: \(ret)")
-        }
-        return ret
-    }
-
-    func readPause() -> Int32 {
-        guard let fmt = formatCtx else { return -1 }
-
-        let ret = av_read_pause(fmt)
-
-        if ret >= 0 {
-            if state != .paused { state = .paused }
-        } else {
-            //if state != .error { state = .error }
-            print("FFmpeg## av_read_pause error: \(ret)")
-        }
 
         return ret
     }
@@ -721,39 +695,25 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - Utility
     
     public func pause() {
-        if isPaused { return }
         
         pauseCondition.lock()
         isPaused = true
         waitingForKeyframe = true
         
-        _ = readPause()
-        
         player?.pause()
         engine?.pause()
 
+        pauseCondition.signal()
         pauseCondition.unlock()
         
         print("FFmpeg## Pause")
     }
 
     public func resume() {
-        if !isPaused { return }
-        
         pauseCondition.lock()
         isPaused = false
-
-        if let vctx = videoCodecCtx {
-            avcodec_flush_buffers(vctx)
-        }
-        if let actx = audioCodecCtx {
-            avcodec_flush_buffers(actx)
-        }
-        
-        _ = readPlay()
             
         playStartTime = CFAbsoluteTimeGetCurrent()
-        //basePTS = currentVideoPTS  // resume 시점 PTS를 기준으로 재설정
         
         if engine?.isRunning == false {
             try? engine?.start()
