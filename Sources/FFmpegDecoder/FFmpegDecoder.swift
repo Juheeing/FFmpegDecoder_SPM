@@ -64,11 +64,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private var player: AVAudioPlayerNode?
     private var audioSampleRate: Double = 0
     private var audioChannels: Int = 0
-    
-    // MARK: - Clock
-    /*private var playStartTime: CFAbsoluteTime = 0
-    private var basePTS: Double = 0
-    private var waitingForKeyframe = false*/
 
     // MARK: - Pause Condition
     private let pauseCondition = NSCondition()
@@ -299,29 +294,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
                         let recvRet = receiveFrame(ctx: videoCodecCtx, frame: vFrame)
                         
                         if recvRet < 0 { break }
-                        
-                        /*let pictType = vFrame!.pointee.pict_type
-                        
-                        let pts = vFrame!.pointee.pts
-                        guard let stream = videoStream else { break }
-                        let ptsSec = ptsToSec(pts, stream.pointee.time_base)
-
-                        if waitingForKeyframe {
-                            if pictType == AV_PICTURE_TYPE_I {
-                                waitingForKeyframe = false
-                                playStartTime = CFAbsoluteTimeGetCurrent()
-                                basePTS = ptsSec
-                            } else {
-                                continue
-                            }
-                        }
-                        
-                        let elapsed = CFAbsoluteTimeGetCurrent() - playStartTime
-                        let diff = ptsSec - basePTS - elapsed
-
-                        if diff > 0 {
-                            usleep(useconds_t(diff * 1_000_000))
-                        }*/
             
                         getCurrentTime(frame: vFrame, stream: videoStream)
                         drawImage()
@@ -403,7 +375,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         let ret = av_read_play(fmt)
 
         if ret >= 0 {
-            if state != .bufferFinished { state = .bufferFinished }
+            if state != .readyToPlay { state = .readyToPlay }
         } else {
             //if state != .error { state = .error }
             print("FFmpeg## av_read_play error: \(ret)")
@@ -725,7 +697,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         pauseCondition.lock()
         isPaused = true
-        //waitingForKeyframe = true
         
         player?.pause()
         engine?.pause()
@@ -742,8 +713,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         pauseCondition.lock()
         isPaused = false
             
-        //playStartTime = CFAbsoluteTimeGetCurrent()
-
         pauseCondition.signal()
         pauseCondition.unlock()
         print("FFmpeg## Resume")
