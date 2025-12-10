@@ -66,10 +66,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private var audioChannels: Int = 0
     
     // MARK: - Clock
-    private var playStartTime: CFAbsoluteTime = 0
+    /*private var playStartTime: CFAbsoluteTime = 0
     private var basePTS: Double = 0
-    private var currentVideoPTS: Double = 0
-    private var needKeyframeAfterResume = false
+    private var currentVideoPTS: Double = 0*/
 
     // MARK: - Pause Condition
     private let pauseCondition = NSCondition()
@@ -276,14 +275,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
                     
             _ = readFrame(packet: pktPtr)
             
-            if needKeyframeAfterResume {
-                if !h264PacketContainsIDR(pktPtr) {
-                    av_packet_unref(pktPtr)
-                    continue // 다음 패킷 읽기
-                }
-                needKeyframeAfterResume = false
-            }
-            
             if state != .readyToPlay { state = .readyToPlay }
             
             let streamIndex = pktPtr.pointee.stream_index
@@ -299,27 +290,19 @@ public final class FFmpegDecoder: @unchecked Sendable {
                         if recvRet < 0 { break }
                         
                         let pictType = vFrame!.pointee.pict_type
-                        if needKeyframeAfterResume {
-                            if pictType != AV_PICTURE_TYPE_I {
-                                av_frame_unref(vFrame)
-                                continue
-                            } else {
-                                needKeyframeAfterResume = false
-                            }
-                        }
-
+                        
                         let pts = vFrame!.pointee.pts
                         guard let stream = videoStream else { break }
                         let ptsSec = ptsToSec(pts, stream.pointee.time_base)
 
-                        currentVideoPTS = ptsSec
+                        /*currentVideoPTS = ptsSec
 
                         let elapsed = CFAbsoluteTimeGetCurrent() - playStartTime
                         let diff = ptsSec - basePTS - elapsed
 
                         if diff > 0 {
                             usleep(useconds_t(diff * 1_000_000))
-                        }
+                        }*/
             
                         getCurrentTime(frame: vFrame, stream: videoStream)
                         drawImage()
@@ -742,11 +725,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if let actx = audioCodecCtx {
             avcodec_flush_buffers(actx)
         }
-        
-        needKeyframeAfterResume = true
-    
-        playStartTime = CFAbsoluteTimeGetCurrent()
-        basePTS = currentVideoPTS  // resume 시점 PTS를 기준으로 재설정
+            
+//        playStartTime = CFAbsoluteTimeGetCurrent()
+//        basePTS = currentVideoPTS  
         
         if engine?.isRunning == false {
             try? engine?.start()
