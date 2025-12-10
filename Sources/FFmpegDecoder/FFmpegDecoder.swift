@@ -267,50 +267,48 @@ public final class FFmpegDecoder: @unchecked Sendable {
             pauseCondition.unlock()
             
             if stopNow { break }
+                    
+            _ = readFrame(packet: pktPtr)
             
-            while readFrame(packet: pktPtr) >= 0 && !decodingStopped {
-                
-                if state != .readyToPlay { state = .readyToPlay }
-                
-                let streamIndex = pktPtr.pointee.stream_index
+            if state != .readyToPlay { state = .readyToPlay }
+            
+            let streamIndex = pktPtr.pointee.stream_index
 
-                if streamIndex == videoStreamIndex {
+            if streamIndex == videoStreamIndex {
 
-                    let sendRet = sendPacket(ctx: videoCodecCtx, packet: pktPtr)
+                let sendRet = sendPacket(ctx: videoCodecCtx, packet: pktPtr)
 
-                    if sendRet >= 0 {
-                        while true {
-                            let recvRet = receiveFrame(ctx: videoCodecCtx, frame: vFrame)
-                            
-                            if recvRet < 0 { break }
-                            
-                            getCurrentTime(frame: vFrame, stream: videoStream)
-                            drawImage()
-                        }
-                    }
-                } else if streamIndex == audioStreamIndex {
-
-                    let sendRet = sendPacket(ctx: audioCodecCtx, packet: pktPtr)
-
-                    if sendRet >= 0 {
-                        while true {
-                            let recvRet = receiveFrame(ctx: audioCodecCtx, frame: aFrame)
-
-                            if recvRet < 0 { break }
-
-                            drawAudio()
-                        }
+                if sendRet >= 0 {
+                    while true {
+                        let recvRet = receiveFrame(ctx: videoCodecCtx, frame: vFrame)
+                        
+                        if recvRet < 0 { break }
+                        
+                        getCurrentTime(frame: vFrame, stream: videoStream)
+                        drawImage()
                     }
                 }
+            } else if streamIndex == audioStreamIndex {
 
-                av_packet_unref(pktPtr)
+                let sendRet = sendPacket(ctx: audioCodecCtx, packet: pktPtr)
+
+                if sendRet >= 0 {
+                    while true {
+                        let recvRet = receiveFrame(ctx: audioCodecCtx, frame: aFrame)
+
+                        if recvRet < 0 { break }
+
+                        drawAudio()
+                    }
+                }
             }
+
+            av_packet_unref(pktPtr)
 
         }
         clear()
     }
 
-    
     // MARK: - FFmpeg Functions
     
     func readFrame(packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
