@@ -290,8 +290,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
                         
                         if recvRet < 0 { break }
                         
-                        if recvRet >= 0 {
-
                         let pictType = vFrame!.pointee.pict_type
                         if needKeyframeAfterResume {
                             if pictType != AV_PICTURE_TYPE_I {
