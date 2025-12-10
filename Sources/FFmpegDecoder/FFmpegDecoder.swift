@@ -264,9 +264,13 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 pauseCondition.lock()
                 let p = isPaused
                 if p {
-                    if state != .paused { _ = readPause(); state = .paused }
+                    if state != .paused {
+                        _ = readPause()
+                    }
                 } else {
-                    if state != .readyToPlay { _ = readPlay(); state = .readyToPlay }
+                    if state == .paused {
+                        _ = readPlay()
+                    }
                 }
                 pauseCondition.unlock()
                 return p
@@ -377,7 +381,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if ret >= 0 {
             if state != .readyToPlay { state = .readyToPlay }
         } else {
-            //if state != .error { state = .error }
+            if state != .error { state = .error }
             print("FFmpeg## av_read_play error: \(ret)")
         }
         return ret
@@ -391,7 +395,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if ret >= 0 {
             if state != .paused { state = .paused }
         } else {
-            //if state != .error { state = .error }
+            if state != .error { state = .error }
             print("FFmpeg## av_read_pause error: \(ret)")
         }
 
