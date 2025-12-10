@@ -66,9 +66,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private var audioChannels: Int = 0
     
     // MARK: - Clock
-    private var playStartTime: CFAbsoluteTime = 0
+    /*private var playStartTime: CFAbsoluteTime = 0
     private var basePTS: Double = 0
-    private var waitingForKeyframe = false
+    private var waitingForKeyframe = false*/
 
     // MARK: - Pause Condition
     private let pauseCondition = NSCondition()
@@ -300,7 +300,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
                         
                         if recvRet < 0 { break }
                         
-                        let pictType = vFrame!.pointee.pict_type
+                        /*let pictType = vFrame!.pointee.pict_type
                         
                         let pts = vFrame!.pointee.pts
                         guard let stream = videoStream else { break }
@@ -321,7 +321,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
                         if diff > 0 {
                             usleep(useconds_t(diff * 1_000_000))
-                        }
+                        }*/
             
                         getCurrentTime(frame: vFrame, stream: videoStream)
                         drawImage()
@@ -725,7 +725,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         pauseCondition.lock()
         isPaused = true
-        waitingForKeyframe = true
+        //waitingForKeyframe = true
         
         player?.pause()
         engine?.pause()
@@ -742,7 +742,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         pauseCondition.lock()
         isPaused = false
             
-        playStartTime = CFAbsoluteTimeGetCurrent()
+        //playStartTime = CFAbsoluteTimeGetCurrent()
 
         pauseCondition.signal()
         pauseCondition.unlock()
