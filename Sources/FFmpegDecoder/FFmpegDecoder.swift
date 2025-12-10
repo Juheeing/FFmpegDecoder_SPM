@@ -69,6 +69,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private var playStartTime: CFAbsoluteTime = 0
     private var basePTS: Double = 0
     private var currentVideoPTS: Double = 0
+    private var waitingKeyFrame: Bool = false
 
     // MARK: - Pause Condition
     private let pauseCondition = NSCondition()
@@ -304,6 +305,15 @@ public final class FFmpegDecoder: @unchecked Sendable {
                         let ptsSec = ptsToSec(pts, stream.pointee.time_base)
 
                         currentVideoPTS = ptsSec
+                        
+                        if waitingKeyFrame {
+                            if vFrame!.pointee.key_frame == 1 {
+                                waitingKeyFrame = false
+                            } else {
+                                av_frame_unref(vFrame)
+                                continue
+                            }
+                        }
 
                         let elapsed = CFAbsoluteTimeGetCurrent() - playStartTime
                         let diff = ptsSec - basePTS - elapsed
@@ -352,6 +362,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 print("FFmpeg## readFrame: EOF reached")
                 if state != .playedToTheEnd { state = .playedToTheEnd }
                 stopDecoding()
+            } else if ret == EAGAIN {
+                usleep(10_000)
             } else {
                 print("FFmpeg## readFrame error: \(ret)")
             }
@@ -739,6 +751,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         playStartTime = CFAbsoluteTimeGetCurrent()
         basePTS = currentVideoPTS  // resume 시점 PTS를 기준으로 재설정
+        waitingKeyFrame = true
         
         if engine?.isRunning == false {
             try? engine?.start()
