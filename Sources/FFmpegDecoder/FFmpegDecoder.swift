@@ -743,11 +743,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         isPaused = false
             
         playStartTime = CFAbsoluteTimeGetCurrent()
-        
-        if engine?.isRunning == false {
-            try? engine?.start()
-        }
-        player?.play()
 
         pauseCondition.signal()
         pauseCondition.unlock()
