@@ -69,7 +69,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private var playStartTime: CFAbsoluteTime = 0
     private var basePTS: Double = 0
     private var currentVideoPTS: Double = 0
-    private var waitingKeyFrame: Bool = false
+    private var needKeyframeAfterResume = false
 
     // MARK: - Pause Condition
     private let pauseCondition = NSCondition()
@@ -267,13 +267,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
             pauseCondition.lock()
             while isPaused && !decodingStopped {
                 if state != .paused { state = .paused }
-                
-                if readFrame(packet: pktPtr) >= 0 {
-                    av_packet_unref(pktPtr)
-                } else {
-                    usleep(10_000)
-                }
-    
                 pauseCondition.wait()
             }
             let stopNow = decodingStopped
@@ -281,10 +274,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
             
             if stopNow { break }
                     
-            let readRet = readFrame(packet: pktPtr)
-            if readRet < 0 {
-                continue
-            }
+            _ = readFrame(packet: pktPtr)
             
             if state != .readyToPlay { state = .readyToPlay }
             
@@ -300,20 +290,23 @@ public final class FFmpegDecoder: @unchecked Sendable {
                         
                         if recvRet < 0 { break }
                         
+                        if recvRet >= 0 {
+
+                        let pictType = vFrame!.pointee.pict_type
+                        if needKeyframeAfterResume {
+                            if pictType != AV_PICTURE_TYPE_I {
+                                av_frame_unref(vFrame)
+                                continue
+                            } else {
+                                needKeyframeAfterResume = false
+                            }
+                        }
+
                         let pts = vFrame!.pointee.pts
                         guard let stream = videoStream else { break }
                         let ptsSec = ptsToSec(pts, stream.pointee.time_base)
 
                         currentVideoPTS = ptsSec
-                        
-                        if waitingKeyFrame {
-                            if vFrame!.pointee.key_frame == 1 {
-                                waitingKeyFrame = false
-                            } else {
-                                av_frame_unref(vFrame)
-                                continue
-                            }
-                        }
 
                         let elapsed = CFAbsoluteTimeGetCurrent() - playStartTime
                         let diff = ptsSec - basePTS - elapsed
@@ -362,8 +355,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 print("FFmpeg## readFrame: EOF reached")
                 if state != .playedToTheEnd { state = .playedToTheEnd }
                 stopDecoding()
-            } else if ret == EAGAIN {
-                usleep(10_000)
             } else {
                 print("FFmpeg## readFrame error: \(ret)")
             }
@@ -394,35 +385,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         }
 
         let ret = avcodec_receive_frame(ctx, frame)
-
-        return ret
-    }
-
-    func readPlay() -> Int32 {
-        guard let fmt = formatCtx else { return -1 }
-
-        let ret = av_read_play(fmt)
-
-        if ret >= 0 {
-            if state != .bufferFinished { state = .bufferFinished }
-        } else {
-            if state != .error { state = .error }
-            print("FFmpeg## av_read_play error: \(ret)")
-        }
-        return ret
-    }
-
-    func readPause() -> Int32 {
-        guard let fmt = formatCtx else { return -1 }
-
-        let ret = av_read_pause(fmt)
-
-        if ret >= 0 {
-            if state != .paused { state = .paused }
-        } else {
-            if state != .error { state = .error }
-            print("FFmpeg## av_read_pause error: \(ret)")
-        }
 
         return ret
     }
@@ -726,8 +688,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         pauseCondition.lock()
         isPaused = true
 
-        //_ = self.readPause()
-
         player?.pause()
         engine?.pause()
 
@@ -746,12 +706,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if let actx = audioCodecCtx {
             avcodec_flush_buffers(actx)
         }
+        
+        needKeyframeAfterResume = true
     
-        //_ = self.readPlay()
-
         playStartTime = CFAbsoluteTimeGetCurrent()
         basePTS = currentVideoPTS  // resume 시점 PTS를 기준으로 재설정
-        waitingKeyFrame = true
         
         if engine?.isRunning == false {
             try? engine?.start()
