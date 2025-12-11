@@ -71,6 +71,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // 디코딩 스레드
     private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
     
+    private var keepAliveTimer: DispatchSourceTimer?
+    
     public init() {
         avformat_network_init()
     }
@@ -264,6 +266,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
                     player?.pause()
                     engine?.pause()
                     _ = readPause()
+                    startKeepAlive()
                 }
                 pauseCondition.wait()
             }
@@ -271,6 +274,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
             if state == .paused {
                 _ = readPlay()
+                stopKeepAlive()
             }
         
             let readRet = readFrame(packet: pktPtr)
@@ -397,6 +401,42 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         return ret
     }
+    
+    // MARK: - Keep Alive
+    
+    private func startKeepAlive() {
+        guard let fmt = formatCtx,
+              let rtspStatePtr = fmt.pointee.priv_data else {
+            return
+        }
+        
+        keepAliveTimer = DispatchSource.makeTimerSource(queue: .global())
+        keepAliveTimer?.schedule(deadline: .now() + 10, repeating: 20)
+
+        keepAliveTimer?.setEventHandler { [weak self] in
+            self?.sendKeepAlive(rtspState: rtspStatePtr)
+        }
+        keepAliveTimer?.resume()
+    }
+
+    private func stopKeepAlive() {
+        keepAliveTimer?.cancel()
+        keepAliveTimer = nil
+    }
+
+    private func sendKeepAlive(rtspState: UnsafeMutableRawPointer) {
+        let method = "GET_PARAMETER"
+
+        method.withCString { cstr in
+            let ret = ff_rtsp_send_cmd(rtspState, cstr, nil)
+
+            if ret < 0 {
+                print("RTSP KeepAlive GET_PARAMETER 실패: \(ret)")
+            } else {
+                print("RTSP KeepAlive OK")
+            }
+        }
+    }
 
     // MARK: - Get Current Time
     
@@ -425,10 +465,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         DispatchQueue.main.sync {
             self.delegate?.decoder(self, didUpdateCurrentTime: Int64(seconds), duration: self.durationMs / 1000)
         }
-    }
-    
-    private func ptsToSec(_ pts: Int64, _ timeBase: AVRational) -> Double {
-        return Double(pts) * av_q2d(timeBase)
     }
 
     // MARK: - Draw Image
