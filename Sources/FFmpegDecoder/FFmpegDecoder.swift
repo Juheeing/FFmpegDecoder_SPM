@@ -260,6 +260,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 
             pauseCondition.lock()
             while isPaused {
+                
+                _ = readFrame(packet: pktPtr)
+                av_packet_unref(pktPtr)
+                usleep(80_000) // 80ms
+                
                 if state != .paused {
                     player?.pause()
                     engine?.pause()
