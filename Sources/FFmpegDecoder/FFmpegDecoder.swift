@@ -71,10 +71,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // 디코딩 스레드
     private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
     
-    private var keepAliveSource: DispatchSourceTimer?
-    private var cSeq: Int32 = 1
-    private var rtspUrl: String = ""
-    
     public init() {
         avformat_network_init()
     }
@@ -268,7 +264,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
                     player?.pause()
                     engine?.pause()
                     _ = readPause()
-                    startKeepAlive()
                 }
                 pauseCondition.wait()
             }
@@ -276,8 +271,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
             if state == .paused {
                 _ = readPlay()
-                stopKeepAlive()
-            }
+r            }
         
             let readRet = readFrame(packet: pktPtr)
             if readRet < 0 {
@@ -404,50 +398,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         return ret
     }
     
-    // MARK: - Keep Alive
-    
-    private func startKeepAlive() {
-        stopKeepAlive()
-
-        let source = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
-        source.schedule(deadline: .now() + 20, repeating: 20)
-
-        source.setEventHandler { [weak self] in
-            print("FFmpeg## KeepAlive Dispatch Timer Fired")
-            self?.sendKeepAlive()
-        }
-
-        keepAliveSource = source
-        source.resume()
-    }
-
-    private func stopKeepAlive() {
-        keepAliveSource?.cancel()
-        keepAliveSource = nil
-    }
-
-    private func sendKeepAlive() {
-        guard let fmt = formatCtx, let pb = fmt.pointee.pb else {
-            print("FFmpeg## KeepAlive: formatCtx or pb is nil")
-            return
-        }
-
-        cSeq += 1
-
-        let keepAliveCmd = """
-        OPTIONS \(rtspUrl) RTSP/1.0\r
-        CSeq: \(cSeq)\r
-        \r
-        """
-
-        keepAliveCmd.withCString { cstr in
-            avio_write(pb, cstr, Int32(strlen(cstr)))
-            avio_flush(pb)
-        }
-
-        print("FFmpeg## Send KeepAlive OPTIONS, CSeq=\(cSeq)")
-    }
-
     // MARK: - Get Current Time
     
     private func getCurrentTime(frame: UnsafeMutablePointer<AVFrame>?,
