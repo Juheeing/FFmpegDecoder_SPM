@@ -71,7 +71,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // 디코딩 스레드
     private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
     
-    private var keepAliveTimer: DispatchSourceTimer?
+    private var keepAliveTimer: Timer?
+    private var cSeq: Int32 = 1
+    private var rtspUrl: String = ""
     
     public init() {
         avformat_network_init()
@@ -405,37 +407,38 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - Keep Alive
     
     private func startKeepAlive() {
-        guard let fmt = formatCtx,
-              let rtspStatePtr = fmt.pointee.priv_data else {
-            return
-        }
-        
-        keepAliveTimer = DispatchSource.makeTimerSource(queue: .global())
-        keepAliveTimer?.schedule(deadline: .now() + 10, repeating: 20)
+        stopKeepAlive()
 
-        keepAliveTimer?.setEventHandler { [weak self] in
-            self?.sendKeepAlive(rtspState: rtspStatePtr)
+        keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 20.0, repeats: true) { [weak self] _ in
+            self?.sendKeepAlive()
         }
-        keepAliveTimer?.resume()
     }
 
     private func stopKeepAlive() {
-        keepAliveTimer?.cancel()
+        keepAliveTimer?.invalidate()
         keepAliveTimer = nil
     }
 
-    private func sendKeepAlive(rtspState: UnsafeMutableRawPointer) {
-        let method = "GET_PARAMETER"
-
-        method.withCString { cstr in
-            let ret = ff_rtsp_send_cmd(rtspState, cstr, nil)
-
-            if ret < 0 {
-                print("RTSP KeepAlive GET_PARAMETER 실패: \(ret)")
-            } else {
-                print("RTSP KeepAlive OK")
-            }
+    private func sendKeepAlive() {
+        guard let fmt = formatCtx, let pb = fmt.pointee.pb else {
+            print("FFmpeg## KeepAlive: formatCtx or pb is nil")
+            return
         }
+
+        cSeq += 1
+
+        let keepAliveCmd = """
+        OPTIONS \(rtspUrl) RTSP/1.0\r
+        CSeq: \(cSeq)\r
+        \r
+        """
+
+        keepAliveCmd.withCString { cstr in
+            avio_write(pb, cstr, Int32(strlen(cstr)))
+            avio_flush(pb)
+        }
+
+        print("FFmpeg## Send KeepAlive OPTIONS, CSeq=\(cSeq)")
     }
 
     // MARK: - Get Current Time
