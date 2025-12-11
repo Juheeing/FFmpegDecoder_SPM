@@ -271,7 +271,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
             if state == .paused {
                 _ = readPlay()
-r            }
+            }
         
             let readRet = readFrame(packet: pktPtr)
             if readRet < 0 {
