@@ -407,7 +407,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - Keep Alive
     
     private func startKeepAlive() {
-        stopKeepAlive()
+        //stopKeepAlive()
 
         keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 20.0, repeats: true) { [weak self] _ in
             self?.sendKeepAlive()
