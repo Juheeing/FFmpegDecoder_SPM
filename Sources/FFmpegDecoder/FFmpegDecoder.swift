@@ -71,7 +71,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // 디코딩 스레드
     private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
     
-    private var keepAliveTimer: Timer?
+    private var keepAliveSource: DispatchSourceTimer?
     private var cSeq: Int32 = 1
     private var rtspUrl: String = ""
     
@@ -407,16 +407,23 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - Keep Alive
     
     private func startKeepAlive() {
-        //stopKeepAlive()
+        stopKeepAlive()
 
-        keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 20.0, repeats: true) { [weak self] _ in
+        let source = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+        source.schedule(deadline: .now() + 20, repeating: 20)
+
+        source.setEventHandler { [weak self] in
+            print("FFmpeg## KeepAlive Dispatch Timer Fired")
             self?.sendKeepAlive()
         }
+
+        keepAliveSource = source
+        source.resume()
     }
 
     private func stopKeepAlive() {
-        keepAliveTimer?.invalidate()
-        keepAliveTimer = nil
+        keepAliveSource?.cancel()
+        keepAliveSource = nil
     }
 
     private func sendKeepAlive() {
