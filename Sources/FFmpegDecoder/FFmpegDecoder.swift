@@ -257,12 +257,12 @@ public final class FFmpegDecoder: @unchecked Sendable {
         }
         
         while !decodingStopped {
-            
-            if state != .readyToPlay { state = .readyToPlay }
-    
+                
             pauseCondition.lock()
             while isPaused {
                 if state != .paused {
+                    player?.pause()
+                    engine?.pause()
                     _ = readPause()
                 }
                 pauseCondition.wait()
@@ -320,6 +320,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
     func readFrame(packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
         guard let fmt = formatCtx else {
+            if state != .error { state = .error }
             print("FFmpeg## readFrame: formatCtx is nil")
             return -1
         }
@@ -332,6 +333,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 if state != .playedToTheEnd { state = .playedToTheEnd }
                 stopDecoding()
             } else {
+                if state != .error { state = .error }
                 print("FFmpeg## readFrame error: \(ret)")
             }
         }
@@ -343,6 +345,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
                     packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
 
         guard let ctx else {
+            if state != .error { state = .error }
             print("FFmpeg## sendPacket: codec context is nil")
             return -1
         }
@@ -356,6 +359,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
                       frame: UnsafeMutablePointer<AVFrame>?) -> Int32 {
 
         guard let ctx else {
+            if state != .error { state = .error }
             print("FFmpeg## receiveFrame: codec context is nil")
             return -1
         }
@@ -693,9 +697,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         pauseCondition.lock()
         isPaused = true
-        
-        player?.pause()
-        engine?.pause()
 
         pauseCondition.signal()
         pauseCondition.unlock()
