@@ -260,26 +260,17 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 
             pauseCondition.lock()
             while isPaused {
-
-                let readRet = readFrame(packet: pktPtr)
-                print("FFmpeg## pause-loop readFrame => \(readRet)")
-                if readRet >= 0 {
-                    av_packet_unref(pktPtr)
-                } else {
-                    av_packet_unref(pktPtr)
-                    usleep(80_000)
-                }
                 if state != .paused {
                     player?.pause()
                     engine?.pause()
-                    state = .paused
+                    _ = readPause()
                 }
-                pauseCondition.wait(until: Date().addingTimeInterval(0.08))
+                pauseCondition.wait()
             }
             pauseCondition.unlock()
 
             if state == .paused {
-                state = .readyToPlay
+                _ = readPlay()
             }
         
             let readRet = readFrame(packet: pktPtr)
