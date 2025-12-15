@@ -7,7 +7,7 @@ import Foundation
 let package = Package(
     name: "FFmpegDecoder",
     platforms: [
-        .iOS(.v15)
+        .iOS(.v16)
     ],
     products: [
         .library(
