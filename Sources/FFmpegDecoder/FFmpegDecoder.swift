@@ -358,6 +358,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 }
 
                 self.drawImage(frame)
+                self.getCurrentTime()
             }
         }
     }
@@ -455,33 +456,18 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
     // MARK: - Get Current Time
     
-    private func getCurrentTime(frame: UnsafeMutablePointer<AVFrame>?,
-                        stream: UnsafeMutablePointer<AVStream>?) {
-
-        guard let frame = frame else { return }
-
-        let streamRef = stream ?? videoStream
-        guard let stream = streamRef else { return }
+    private func getCurrentTime() {
+        let seconds = Int64(clock.currentTime())
         
-        let AV_NOPTS_VALUE: Int64 = Int64.min
-        var pts = frame.pointee.best_effort_timestamp
-        
-        if pts == AV_NOPTS_VALUE {
-            pts = frame.pointee.pts
-            
-            if pts == AV_NOPTS_VALUE {
-                return
-            }
-        }
-        
-        let ms = av_rescale_q(pts, stream.pointee.time_base, AVRational(num: 1, den: 1000))
-        let seconds = Double(ms) / 1000.0
-        
-        DispatchQueue.main.sync {
-            self.delegate?.decoder(self, didUpdateCurrentTime: Int64(seconds), duration: self.durationMs / 1000)
+        DispatchQueue.main.async {
+            self.delegate?.decoder(
+                self,
+                didUpdateCurrentTime: seconds,
+                duration: self.durationMs / 1000
+            )
         }
     }
-
+    
     // MARK: - Draw Image
     
     private func drawImage(_ frame: UnsafeMutablePointer<AVFrame>?) {
@@ -748,7 +734,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
     public func pause() {
         if isPaused { return }
-        
+        isPaused = true
         clock.pause()
         player?.pause()
         state = .paused
@@ -758,7 +744,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     public func resume() {
         if !isPaused { return }
-        
+        isPaused = false
         clock.play()
         player?.play()
         state = .readyToPlay
