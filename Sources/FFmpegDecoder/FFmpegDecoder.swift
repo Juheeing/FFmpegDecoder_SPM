@@ -68,6 +68,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - Pause Condition
     private let pauseCondition = NSCondition()
 
+    private var keepAliveTimer: DispatchSourceTimer?
+    
     // 디코딩 스레드
     private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
     
@@ -230,11 +232,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
         }
 
         let rate = codecCtx.pointee.sample_rate
-        let channels = codecCtx.pointee.channel_layout
+        let channels = codecCtx.pointee.ch_layout.nb_channels
         
         print("FFmpeg## sample rate: \(rate)")
         print("FFmpeg## channels: \(channels)")
-        print("FFmpeg## channel layout: \(codecCtx.pointee.channel_layout)")
+        print("FFmpeg## channel layout: \(codecCtx.pointee.ch_layout)")
         print("FFmpeg## sample format: \(codecCtx.pointee.sample_fmt.rawValue)")
         
         audioSampleRate = Double(rate)
@@ -259,18 +261,26 @@ public final class FFmpegDecoder: @unchecked Sendable {
         while !decodingStopped {
                 
             pauseCondition.lock()
+            
             while isPaused {
+                
                 if state != .paused {
+                    
                     player?.pause()
                     engine?.pause()
+                    
                     _ = readPause()
+                    startRTSPKeepAlive()
                 }
+                
                 pauseCondition.wait()
             }
+            
             pauseCondition.unlock()
 
             if state == .paused {
                 _ = readPlay()
+                stopRTSPKeepAlive()
             }
         
             let readRet = readFrame(packet: pktPtr)
@@ -581,7 +591,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         }
 
         let sampleRate = Double(audioCodecCtx.sample_rate)
-        let channels = Int(audioCodecCtx.channel_layout)
+        let channels = Int(audioCodecCtx.ch_layout.nb_channels)
         let frameCount = AVAudioFrameCount(aFrame.nb_samples)
 
         // sample format
@@ -686,6 +696,26 @@ public final class FFmpegDecoder: @unchecked Sendable {
         return p
     }
 
+    // MARK: - Keep Alive
+    
+    func startRTSPKeepAlive() {
+        keepAliveTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+        keepAliveTimer?.schedule(deadline: .now(),
+                                 repeating: .seconds(10))
+        keepAliveTimer?.setEventHandler { [weak self] in
+            guard let self,
+                  let ctx = self.formatCtx else { return }
+
+            rtsp_keepalive_wrapper(ctx)
+        }
+        keepAliveTimer?.resume()
+    }
+    
+    func stopRTSPKeepAlive() {
+        keepAliveTimer?.cancel()
+        keepAliveTimer = nil
+    }
+    
     // MARK: - Utility
     
     public func pause() {
