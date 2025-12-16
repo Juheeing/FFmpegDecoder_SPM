@@ -230,11 +230,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
         }
 
         let rate = codecCtx.pointee.sample_rate
-        let channels = codecCtx.pointee.ch_layout.nb_channels
+        let channels = codecCtx.pointee.channel_layout
         
         print("FFmpeg## sample rate: \(rate)")
         print("FFmpeg## channels: \(channels)")
-        print("FFmpeg## channel layout: \(codecCtx.pointee.ch_layout)")
+        print("FFmpeg## channel layout: \(codecCtx.pointee.channel_layout)")
         print("FFmpeg## sample format: \(codecCtx.pointee.sample_fmt.rawValue)")
         
         audioSampleRate = Double(rate)
@@ -581,7 +581,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         }
 
         let sampleRate = Double(audioCodecCtx.sample_rate)
-        let channels = Int(audioCodecCtx.ch_layout.nb_channels)
+        let channels = Int(audioCodecCtx.channel_layout)
         let frameCount = AVAudioFrameCount(aFrame.nb_samples)
 
         // sample format
