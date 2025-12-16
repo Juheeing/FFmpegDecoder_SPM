@@ -71,6 +71,15 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // 디코딩 스레드
     private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
     
+    // MARK: - Buffer & Clock
+    private let videoQueue = FrameQueue<UnsafeMutablePointer<AVFrame>>(maxSize: 90)
+    private let audioQueue = FrameQueue<UnsafeMutablePointer<AVFrame>>(maxSize: 60)
+
+    private let clock = PlaybackClock()
+
+    // Render thread
+    private let renderQueue = DispatchQueue(label: "ffmpeg.render.queue")
+    
     public init() {
         avformat_network_init()
     }
@@ -158,6 +167,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         print("FFmpeg## 디코딩 준비 완료 → readyToPlay")
         state = .readyToPlay
+
+        clock.reset()
+        clock.play()
+
+        startVideoRenderLoop()
         
         decoding()
     }
@@ -258,19 +272,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         while !decodingStopped {
                 
-            pauseCondition.lock()
-            while isPaused {
-                if state != .paused {
-                    player?.pause()
-                    engine?.pause()
-                    _ = readPause()
-                }
-                pauseCondition.wait()
-            }
-            pauseCondition.unlock()
-
-            if state == .paused {
-                _ = readPlay()
+            // 버퍼가 가득 차면 디코딩 속도 제한
+            if videoQueue.count >= videoQueue.maxSize ||
+               audioQueue.count >= audioQueue.maxSize {
+                usleep(10_000)
+                continue
             }
         
             let readRet = readFrame(packet: pktPtr)
@@ -283,29 +289,27 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
             if streamIndex == videoStreamIndex {
 
-                let sendRet = sendPacket(ctx: videoCodecCtx, packet: pktPtr)
-
-                if sendRet >= 0 {
-                    while true {
-                        let recvRet = receiveFrame(ctx: videoCodecCtx, frame: vFrame)
+                if sendPacket(ctx: videoCodecCtx, packet: pktPtr) >= 0 {
+                    
+                    while receiveFrame(ctx: videoCodecCtx, frame: vFrame) >= 0 {
                         
-                        if recvRet < 0 { break }
-            
-                        getCurrentTime(frame: vFrame, stream: videoStream)
-                        drawImage()
+                        if let cloned = av_frame_clone(vFrame) {
+                            
+                            videoQueue.push(cloned)
+                        }
                     }
                 }
+                
             } else if streamIndex == audioStreamIndex {
 
-                let sendRet = sendPacket(ctx: audioCodecCtx, packet: pktPtr)
-
-                if sendRet >= 0 {
-                    while true {
-                        let recvRet = receiveFrame(ctx: audioCodecCtx, frame: aFrame)
-
-                        if recvRet < 0 { break }
-
-                        drawAudio()
+                if sendPacket(ctx: audioCodecCtx, packet: pktPtr) >= 0 {
+                    
+                    while receiveFrame(ctx: audioCodecCtx, frame: aFrame) >= 0 {
+                        
+                        if let cloned = av_frame_clone(aFrame) {
+                            
+                            audioQueue.push(cloned)
+                        }
                     }
                 }
             }
@@ -314,6 +318,43 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         }
         clear()
+    }
+    
+    private func startVideoRenderLoop() {
+        renderQueue.async {
+            while !self.decodingStopped {
+
+                if self.clock.isPaused {
+                    usleep(10_000)
+                    continue
+                }
+
+                guard let frame = self.videoQueue.pop(),
+                      let stream = self.videoStream else {
+                    self.state = .buffering
+                    usleep(10_000)
+                    continue
+                }
+
+                self.state = .bufferFinished
+
+                let pts = frame.pointee.best_effort_timestamp
+                let time = av_rescale_q(
+                    pts,
+                    stream.pointee.time_base,
+                    AVRational(num: 1, den: 1_000_000)
+                )
+
+                let frameTime = Double(time) / 1_000_000
+                let delay = frameTime - self.clock.currentTime()
+
+                if delay > 0 {
+                    usleep(UInt32(delay * 1_000_000))
+                }
+
+                self.drawImage(frame)
+            }
+        }
     }
 
     // MARK: - FFmpeg Functions
@@ -429,12 +470,12 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     // MARK: - Draw Image
     
-    private func drawImage() {
-        guard let vFrame = vFrame else { return }
+    private func drawImage(_ frame: UnsafeMutablePointer<AVFrame>?) {
+        guard let frame = frame else { return }
 
-        let srcWidth = Int(vFrame.pointee.width)
-        let srcHeight = Int(vFrame.pointee.height)
-        let srcFormat = AVPixelFormat(rawValue: vFrame.pointee.format)
+        let srcWidth = Int(frame.pointee.width)
+        let srcHeight = Int(frame.pointee.height)
+        let srcFormat = AVPixelFormat(rawValue: frame.pointee.format)
         let dstFormat = AV_PIX_FMT_BGRA // BGRA -> CGImage/CIImage에 적합
 
         // prepare swsCtx and dst buffers once
@@ -477,25 +518,25 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         // MARK: - 튜플 → 배열 변환
         let srcDataArray: [UnsafePointer<UInt8>?] = [
-            vFrame.pointee.data.0.map { UnsafePointer($0) },
-            vFrame.pointee.data.1.map { UnsafePointer($0) },
-            vFrame.pointee.data.2.map { UnsafePointer($0) },
-            vFrame.pointee.data.3.map { UnsafePointer($0) },
-            vFrame.pointee.data.4.map { UnsafePointer($0) },
-            vFrame.pointee.data.5.map { UnsafePointer($0) },
-            vFrame.pointee.data.6.map { UnsafePointer($0) },
-            vFrame.pointee.data.7.map { UnsafePointer($0) }
+            frame.pointee.data.0.map { UnsafePointer($0) },
+            frame.pointee.data.1.map { UnsafePointer($0) },
+            frame.pointee.data.2.map { UnsafePointer($0) },
+            frame.pointee.data.3.map { UnsafePointer($0) },
+            frame.pointee.data.4.map { UnsafePointer($0) },
+            frame.pointee.data.5.map { UnsafePointer($0) },
+            frame.pointee.data.6.map { UnsafePointer($0) },
+            frame.pointee.data.7.map { UnsafePointer($0) }
         ]
 
         let srcLinesizeArray: [Int32] = [
-            vFrame.pointee.linesize.0,
-            vFrame.pointee.linesize.1,
-            vFrame.pointee.linesize.2,
-            vFrame.pointee.linesize.3,
-            vFrame.pointee.linesize.4,
-            vFrame.pointee.linesize.5,
-            vFrame.pointee.linesize.6,
-            vFrame.pointee.linesize.7
+            frame.pointee.linesize.0,
+            frame.pointee.linesize.1,
+            frame.pointee.linesize.2,
+            frame.pointee.linesize.3,
+            frame.pointee.linesize.4,
+            frame.pointee.linesize.5,
+            frame.pointee.linesize.6,
+            frame.pointee.linesize.7
         ]
 
         // MARK: - sws_scale 호출
@@ -691,11 +732,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
     public func pause() {
         if isPaused { return }
         
-        pauseCondition.lock()
-        isPaused = true
-
-        pauseCondition.signal()
-        pauseCondition.unlock()
+        clock.pause()
+        player?.pause()
+        state = .paused
         
         print("FFmpeg## Pause")
     }
@@ -703,11 +742,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
     public func resume() {
         if !isPaused { return }
         
-        pauseCondition.lock()
-        isPaused = false
-            
-        pauseCondition.signal()
-        pauseCondition.unlock()
+        clock.play()
+        player?.play()
+        state = .readyToPlay
+        
         print("FFmpeg## Resume")
     }
 
