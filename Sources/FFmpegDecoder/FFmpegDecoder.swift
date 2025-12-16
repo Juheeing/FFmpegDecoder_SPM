@@ -67,10 +67,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     // MARK: - Pause Condition
     private let pauseCondition = NSCondition()
-    private var pausePTS: Int64 = .min
-    private var pauseWallTime: Int64 = 0
-    private var totalPausedDuration: Int64 = 0
-    private var didEnterPause = false
     
     // 디코딩 스레드
     private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
@@ -267,15 +263,15 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 if state != .paused {
                     player?.pause()
                     engine?.pause()
-                    //_ = readPause()
+                    _ = readPause()
                 }
                 pauseCondition.wait()
             }
             pauseCondition.unlock()
 
-//            if state == .paused {
-//                _ = readPlay()
-//            }
+            if state == .paused {
+                _ = readPlay()
+            }
         
             let readRet = readFrame(packet: pktPtr)
             if readRet < 0 {
