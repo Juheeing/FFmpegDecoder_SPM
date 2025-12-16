@@ -374,7 +374,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 }
 
                 guard let frame = self.audioQueue.pop(),
-                      let stream = self.audioStream,
                       let codecCtx = self.audioCodecCtx else {
 
                     self.state = .buffering
@@ -639,6 +638,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         let sampleRate = Double(audioCodecCtx.sample_rate)
         let channels = Int(audioCodecCtx.ch_layout.nb_channels)
         let frameCount = AVAudioFrameCount(frame.nb_samples)
+        let frameDuration = Double(frame.nb_samples) / sampleRate
 
         // sample format
         let sampleFormat = audioCodecCtx.sample_fmt
@@ -681,7 +681,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
             }
         }
 
-        player.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
+        player.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
+            self?.audioBufferedSeconds -= frameDuration
+        }
 
         if !engine.isRunning {
             do {
