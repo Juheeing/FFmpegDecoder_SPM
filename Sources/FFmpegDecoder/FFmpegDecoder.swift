@@ -67,8 +67,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     // MARK: - Pause Condition
     private let pauseCondition = NSCondition()
-
-    private var keepAliveTimer: DispatchSourceTimer?
+    private var pausePTS: Int64 = .min
+    private var pauseWallTime: Int64 = 0
+    private var totalPausedDuration: Int64 = 0
+    private var didEnterPause = false
     
     // 디코딩 스레드
     private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
@@ -261,27 +263,19 @@ public final class FFmpegDecoder: @unchecked Sendable {
         while !decodingStopped {
                 
             pauseCondition.lock()
-            
             while isPaused {
-                
                 if state != .paused {
-                    
                     player?.pause()
                     engine?.pause()
-                    
-                    _ = readPause()
-                    startRTSPKeepAlive()
+                    //_ = readPause()
                 }
-                
                 pauseCondition.wait()
             }
-            
             pauseCondition.unlock()
 
-            if state == .paused {
-                _ = readPlay()
-                stopRTSPKeepAlive()
-            }
+//            if state == .paused {
+//                _ = readPlay()
+//            }
         
             let readRet = readFrame(packet: pktPtr)
             if readRet < 0 {
@@ -696,26 +690,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         return p
     }
 
-    // MARK: - Keep Alive
-    
-    func startRTSPKeepAlive() {
-        keepAliveTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
-        keepAliveTimer?.schedule(deadline: .now(),
-                                 repeating: .seconds(10))
-        keepAliveTimer?.setEventHandler { [weak self] in
-            guard let self,
-                  let ctx = self.formatCtx else { return }
-
-            rtsp_keepalive_wrapper(ctx)
-        }
-        keepAliveTimer?.resume()
-    }
-    
-    func stopRTSPKeepAlive() {
-        keepAliveTimer?.cancel()
-        keepAliveTimer = nil
-    }
-    
     // MARK: - Utility
     
     public func pause() {
