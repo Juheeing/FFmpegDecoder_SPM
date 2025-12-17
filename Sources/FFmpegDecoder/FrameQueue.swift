@@ -16,32 +16,29 @@ final class FrameQueue<T> {
         self.maxSize = maxSize
     }
 
-    func push(_ item: T) {
-        lock.lock()
-        if queue.count < maxSize {
-            queue.append(item)
-        }
-        lock.unlock()
+    @discardableResult
+    func push(_ item: T) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if queue.count >= maxSize { return false }
+        queue.append(item)
+        return true
     }
 
     func pop() -> T? {
-        lock.lock()
-        let item = queue.isEmpty ? nil : queue.removeFirst()
-        lock.unlock()
-        return item
+        lock.lock(); defer { lock.unlock() }
+        guard !queue.isEmpty else { return nil }
+        return queue.removeFirst()
     }
 
-    func clear() {
-        lock.lock()
+    func clear(_ free: (T) -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        for item in queue { free(item) }
         queue.removeAll()
-        lock.unlock()
     }
-
+    
     var count: Int {
-        lock.lock()
-        let c = queue.count
-        lock.unlock()
-        return c
+        lock.lock(); defer { lock.unlock() }
+        return queue.count
     }
 }
 
