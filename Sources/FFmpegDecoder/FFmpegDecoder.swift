@@ -53,6 +53,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - State
     private var decodingStopped = false
     private var isPaused = false
+    private var isStopped = false
 
     // MARK: - Video Convert
     private var swsCtx: OpaquePointer?
@@ -318,6 +319,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
             av_packet_unref(pktPtr)
         }
+        clear()
     }
     
     // MARK: - Rendering
@@ -755,9 +757,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
         print("FFmpeg## Resume")
     }
 
-    public func stopDecoding() {
+    public func stop() {
+        isStopped = true
         decodingStopped = true
-        clear()
+        
         print("FFmpeg## stopDecoding requested")
     }
     
@@ -766,16 +769,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
 
     private func clear() {
-        videoQueue.clear { frame in
-            var f: UnsafeMutablePointer<AVFrame>? = frame
-            av_frame_free(&f)
-        }
-
-        audioQueue.clear { frame in
-            var f: UnsafeMutablePointer<AVFrame>? = frame
-            av_frame_free(&f)
-        }
-
         if vFrame != nil { av_frame_free(&vFrame) }
         if aFrame != nil { av_frame_free(&aFrame) }
         if videoCodecCtx != nil { avcodec_free_context(&videoCodecCtx) }
@@ -784,11 +777,23 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if let s = swsCtx { sws_freeContext(s); swsCtx = nil }
         if pktPtr != nil { av_packet_free(&pktPtr) }
 
-        player?.stop()
-        engine?.stop()
+        if isStopped {
+            videoQueue.clear { frame in
+                var f: UnsafeMutablePointer<AVFrame>? = frame
+                av_frame_free(&f)
+            }
 
-        player = nil
-        engine = nil
+            audioQueue.clear { frame in
+                var f: UnsafeMutablePointer<AVFrame>? = frame
+                av_frame_free(&f)
+            }
+            
+            player?.stop()
+            engine?.stop()
+
+            player = nil
+            engine = nil
+        }
         
         print("FFmpeg## clear")
     }
