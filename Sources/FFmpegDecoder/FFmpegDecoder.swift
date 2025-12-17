@@ -324,7 +324,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
     private func startVideoRenderLoop() {
         videoRenderQueue.async {
-            while self.videoQueue.count > 0 {
+            while !self.isPaused {
 
                 if self.clock.isPaused {
                     usleep(10_000)
@@ -367,7 +367,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         audioRenderQueue.async {
 
-            while self.audioQueue.count > 0 {
+            while !self.isPaused {
 
                 if self.clock.isPaused {
                     usleep(10_000)
