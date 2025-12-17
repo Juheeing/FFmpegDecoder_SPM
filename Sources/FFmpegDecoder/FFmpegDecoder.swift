@@ -70,14 +70,14 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private let pauseCondition = NSCondition()
     
     // MARK: - Thread
-    private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
-    private let videoRenderQueue = DispatchQueue(label: "ffmpeg.video.render.queue")
-    private let audioRenderQueue = DispatchQueue(label: "ffmpeg.audio.render.queue")
+    private let demuxQueue = DispatchQueue(label: "ffmpeg.demux")
+    private let videoQueue = DispatchQueue(label: "ffmpeg.video")
+    private let audioQueue = DispatchQueue(label: "ffmpeg.audio")
     
     // MARK: - Buffer & Clock
-    private let videoQueue = FrameQueue<UnsafeMutablePointer<AVFrame>>(maxSize: 90)
-    private let audioQueue = FrameQueue<UnsafeMutablePointer<AVFrame>>(maxSize: 60)
-    private let clock = PlaybackClock()
+    private let videoPktQueue = PacketQueue(maxSize: 300)
+    private let audioPktQueue = PacketQueue(maxSize: 300)
+    private let audioClock = AudioClock()
     
     private var audioBufferedSeconds: Double = 0
     private let AUDIO_BUFFER_TARGET: Double = 0.8   // 800ms
@@ -92,12 +92,116 @@ public final class FFmpegDecoder: @unchecked Sendable {
     public func open(url: String) {
         state = .preparing
 
-        decodeQueue.async {
-            self.openFileInternal(url: url)
+        demuxQueue.async { self.demuxLoop(url: url) }
+    }
+    
+    // MARK: - Demux
+    private func demuxLoop(url: String) {
+        avformat_network_init()
+        var ctx: UnsafeMutablePointer<AVFormatContext>?
+        avformat_open_input(&ctx, url, nil, nil)
+        avformat_find_stream_info(ctx, nil)
+        formatCtx = ctx
+
+        for i in 0..<Int(ctx!.pointee.nb_streams) {
+            let st = ctx!.pointee.streams[i]!
+            if st.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_VIDEO && videoStreamIndex == -1 {
+                videoStreamIndex = Int32(i)
+                videoStream = st
+                openVideoCodec(st)
+            }
+            if st.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_AUDIO && audioStreamIndex == -1 {
+                audioStreamIndex = Int32(i)
+                audioStream = st
+                openAudioCodec(st)
+            }
         }
+
+        videoQueue.async { self.videoLoop() }
+        audioQueue.async { self.audioLoop() }
+
+        var pkt = av_packet_alloc()
+        while !isStopped {
+            if av_read_frame(ctx, pkt) < 0 { continue }
+            if pkt!.pointee.stream_index == videoStreamIndex {
+                _ = videoPktQueue.push(pkt!)
+            } else if pkt!.pointee.stream_index == audioStreamIndex {
+                _ = audioPktQueue.push(pkt!)
+            }
+            av_packet_unref(pkt)
+        }
+        av_packet_free(&pkt)
+    }
+    
+    // MARK: - Video Loop
+    private func videoLoop() {
+        var frame = av_frame_alloc()
+        while !isStopped {
+            if isPaused { usleep(10_000); continue }
+            guard let pkt = videoPktQueue.pop() else { continue }
+            if avcodec_send_packet(videoCodecCtx, pkt) >= 0 {
+                while avcodec_receive_frame(videoCodecCtx, frame) >= 0 {
+                    guard let pts = frame?.pointee.best_effort_timestamp else { return }
+                    let time = ptsToSeconds(pts, videoStream!)
+                    let delay = time - audioClock.current
+                    if delay < -0.05 { continue } // drop
+                    if delay > 0 { usleep(UInt32(delay * 1_000_000)) }
+                    drawImage(frame)
+                }
+            }
+            var p: UnsafeMutablePointer<AVPacket>? = pkt
+            av_packet_free(&p)
+        }
+        av_frame_free(&frame)
     }
 
-    private func openFileInternal(url: String) {
+    // MARK: - Audio Loop (MASTER)
+    private func audioLoop() {
+        var frame = av_frame_alloc()
+        while !isStopped {
+            if isPaused { usleep(10_000); continue }
+            guard let pkt = audioPktQueue.pop() else { continue }
+            if avcodec_send_packet(audioCodecCtx, pkt) >= 0 {
+                while avcodec_receive_frame(audioCodecCtx, frame) >= 0 {
+                    guard let pts = frame?.pointee.best_effort_timestamp else { return }
+                    let time = ptsToSeconds(pts, audioStream!)
+                    audioClock.update(time)
+                    drawAudio(frame)
+                }
+            }
+            var p: UnsafeMutablePointer<AVPacket>? = pkt
+            av_packet_free(&p)
+        }
+        av_frame_free(&frame)
+    }
+
+    // MARK: - Codec Open
+    private func openVideoCodec(_ st: UnsafeMutablePointer<AVStream>) {
+        let codec = avcodec_find_decoder(st.pointee.codecpar.pointee.codec_id)
+        videoCodecCtx = avcodec_alloc_context3(codec)
+        avcodec_parameters_to_context(videoCodecCtx, st.pointee.codecpar)
+        avcodec_open2(videoCodecCtx, codec, nil)
+    }
+
+    private func openAudioCodec(_ st: UnsafeMutablePointer<AVStream>) {
+        let codec = avcodec_find_decoder(st.pointee.codecpar.pointee.codec_id)
+        audioCodecCtx = avcodec_alloc_context3(codec)
+        avcodec_parameters_to_context(audioCodecCtx, st.pointee.codecpar)
+        avcodec_open2(audioCodecCtx, codec, nil)
+    }
+    
+    private func ptsToSeconds(_ pts: Int64, _ stream: UnsafeMutablePointer<AVStream>) -> Double {
+        let AV_NOPTS_VALUE: Int64 = Int64.min
+        
+        if pts == AV_NOPTS_VALUE {
+            return 0
+        }
+
+        let timeBase = stream.pointee.time_base
+        return Double(pts) * Double(timeBase.num) / Double(timeBase.den)
+    }
+
+    /*private func openFileInternal(url: String) {
         print("FFmpeg## openFileInternal: \(url)")
         
         var fmtCtx: UnsafeMutablePointer<AVFormatContext>? = avformat_alloc_context()
@@ -471,7 +575,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 duration: self.durationMs / 1000
             )
         }
-    }
+    }*/
     
     // MARK: - Draw Image
     
@@ -740,7 +844,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
     public func pause() {
         if isPaused { return }
         isPaused = true
-        clock.pause()
         player?.pause()
         state = .paused
         
@@ -750,7 +853,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
     public func resume() {
         if !isPaused { return }
         isPaused = false
-        clock.play()
         player?.play()
         state = .readyToPlay
         
@@ -777,23 +879,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if let s = swsCtx { sws_freeContext(s); swsCtx = nil }
         if pktPtr != nil { av_packet_free(&pktPtr) }
 
-        if isStopped {
-            videoQueue.clear { frame in
-                var f: UnsafeMutablePointer<AVFrame>? = frame
-                av_frame_free(&f)
-            }
-
-            audioQueue.clear { frame in
-                var f: UnsafeMutablePointer<AVFrame>? = frame
-                av_frame_free(&f)
-            }
-            
-            player?.stop()
-            engine?.stop()
-
-            player = nil
-            engine = nil
-        }
         
         print("FFmpeg## clear")
     }
