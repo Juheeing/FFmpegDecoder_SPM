@@ -271,12 +271,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         while !decodingStopped {
                 
-            pauseCondition.lock()
-            while isPaused {
-                pauseCondition.wait()
-            }
-            pauseCondition.unlock()
-            
             // 버퍼가 가득 차면 디코딩 속도 제한
             if videoQueue.count >= videoQueue.maxSize ||
                audioQueue.count >= audioQueue.maxSize {
@@ -323,16 +317,14 @@ public final class FFmpegDecoder: @unchecked Sendable {
             }
 
             av_packet_unref(pktPtr)
-
         }
-        clear()
     }
     
     // MARK: - Rendering
     
     private func startVideoRenderLoop() {
         videoRenderQueue.async {
-            while !self.decodingStopped {
+            while self.videoQueue.count > 0 {
 
                 if self.clock.isPaused {
                     usleep(10_000)
@@ -375,7 +367,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         audioRenderQueue.async {
 
-            while !self.decodingStopped {
+            while self.audioQueue.count > 0 {
 
                 if self.clock.isPaused {
                     usleep(10_000)
@@ -427,10 +419,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
             if ret == EOF {
                 print("FFmpeg## readFrame: EOF reached")
                 if state != .playedToTheEnd { state = .playedToTheEnd }
-                stopDecoding()
+                decodingStopped = true
             } else {
-                //if state != .error { state = .error }
                 print("FFmpeg## readFrame error: \(ret)")
+                decodingStopped = true
             }
         }
 
@@ -764,10 +756,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
 
     public func stopDecoding() {
-        pauseCondition.lock()
         decodingStopped = true
-        pauseCondition.signal()
-        pauseCondition.unlock()
+        clear()
         print("FFmpeg## stopDecoding requested")
     }
     
