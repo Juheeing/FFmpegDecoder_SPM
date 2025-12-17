@@ -46,13 +46,15 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private var audioStream: UnsafeMutablePointer<AVStream>?
     
     // MARK: - Frames / Packet
-    private var vFrame: UnsafeMutablePointer<AVFrame>?
-    private var aFrame: UnsafeMutablePointer<AVFrame>?
+    private var vFrame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
+    private var aFrame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
     private var pktPtr: UnsafeMutablePointer<AVPacket>? = nil
     
     // MARK: - State
     private var decodingStopped = false
     private var isPaused = false
+    private var videoRenderStopped = false
+    private var audioRenderStopped = false
 
     // MARK: - Video Convert
     private var swsCtx: OpaquePointer?
@@ -74,8 +76,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private let audioRenderQueue = DispatchQueue(label: "ffmpeg.audio.render.queue")
     
     // MARK: - Buffer & Clock
-    private let videoQueue = FrameQueue<UnsafeMutablePointer<AVFrame>>(maxSize: 1800)
-    private let audioQueue = FrameQueue<UnsafeMutablePointer<AVFrame>>(maxSize: 1800)
+    private let videoPacketQueue = PacketQueue(maxSize: 3000) // 약 1분
+    private let audioPacketQueue = PacketQueue(maxSize: 3000)
     private let clock = PlaybackClock()
     
     private var audioBufferedSeconds: Double = 0
@@ -173,10 +175,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
         clock.reset()
         clock.play()
 
-        startVideoRenderLoop()
-        startAudioRenderLoop()
+        startPacketReadLoop()
         
-        decoding()
+        startAudioRenderLoop()
+        startVideoRenderLoop()
     }
     
     // MARK: - Check Codec
@@ -259,151 +261,158 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     }
     
-    // MARK: - Decoding Loop
+    // MARK: - Read Loop
     
-    private func decoding() {
+    private func startPacketReadLoop() {
 
-        pktPtr = av_packet_alloc()
-        vFrame = av_frame_alloc()
-        aFrame = av_frame_alloc()
-        
-        guard let pktPtr else { return }
-        
-        while !decodingStopped {
-                
-            // 버퍼가 가득 차면 디코딩 속도 제한
-            if videoQueue.count >= videoQueue.maxSize ||
-               audioQueue.count >= audioQueue.maxSize {
-                usleep(10_000)
-                continue
-            }
-        
-            if readFrame(packet: pktPtr) < 0 {
-                av_packet_unref(pktPtr)
-                continue
-            }
+        decodingStopped = false
 
-            let streamIndex = pktPtr.pointee.stream_index
-    
-            if streamIndex == videoStreamIndex {
+        decodeQueue.async { [weak self] in
+            guard let self else { return }
 
-                if sendPacket(ctx: videoCodecCtx, packet: pktPtr) >= 0 {
-                    
-                    while receiveFrame(ctx: videoCodecCtx, frame: vFrame) >= 0 {
-                        
-                        if let cloned = av_frame_clone(vFrame) {
-                            if !videoQueue.push(cloned) {
-                                var f: UnsafeMutablePointer<AVFrame>? = cloned
-                                av_frame_free(&f)
-                            }
-                        }
-                    }
+            while !self.decodingStopped {
+
+                // back pressure (buffer가 가득 차면 대기)
+                if self.videoPacketQueue.isFull &&
+                   self.audioPacketQueue.isFull {
+                    usleep(10_000) // 10ms
+                    continue
                 }
-                
-            } else if streamIndex == audioStreamIndex {
 
-                if sendPacket(ctx: audioCodecCtx, packet: pktPtr) >= 0 {
-                    
-                    while receiveFrame(ctx: audioCodecCtx, frame: aFrame) >= 0 {
-                        
-                        if let cloned = av_frame_clone(aFrame) {
-                            if !audioQueue.push(cloned) {
-                                var f: UnsafeMutablePointer<AVFrame>? = cloned
-                                av_frame_free(&f)
-                            }
-                        }
-                    }
+                guard let pkt = av_packet_alloc() else {
+                    continue
+                }
+
+                let ret = readFrame(packet: pkt)
+
+                if ret < 0 {
+                    // EOF or error
+                    var p: UnsafeMutablePointer<AVPacket>? = pkt
+                    av_packet_free(&p)
+                    break
+                }
+
+                let streamIndex = pkt.pointee.stream_index
+
+                if streamIndex == self.videoStreamIndex {
+                    self.videoPacketQueue.push(pkt)
+                } else if streamIndex == self.audioStreamIndex {
+                    self.audioPacketQueue.push(pkt)
+                } else {
+                    // 필요 없는 stream
+                    var p: UnsafeMutablePointer<AVPacket>? = pkt
+                    av_packet_free(&p)
                 }
             }
-
-            av_packet_unref(pktPtr)
         }
     }
     
     // MARK: - Rendering
     
     private func startVideoRenderLoop() {
-        videoRenderQueue.async {
-            while true {
 
-                if self.clock.isPaused {
+        videoRenderStopped = false
+
+        videoRenderQueue.async { [weak self] in
+            guard let self else { return }
+
+            guard
+                let codecCtx = self.videoCodecCtx,
+                let stream = self.videoStream,
+                let frame = self.vFrame
+            else { return }
+
+            while !self.videoRenderStopped {
+
+                // pause 상태 → render만 멈춤
+                if self.isPaused {
                     usleep(10_000)
                     continue
                 }
 
-                guard let frame = self.videoQueue.pop(),
-                      let stream = self.videoStream else {
-                    DispatchQueue.main.async { self.state = .buffering }
+                // packet pop
+                guard let pkt = self.videoPacketQueue.pop() else {
                     usleep(10_000)
                     continue
                 }
 
-                DispatchQueue.main.async { self.state = .bufferFinished }
+                // send packet
+                _ = sendPacket(ctx: codecCtx, packet: pkt)
 
-                let pts = frame.pointee.best_effort_timestamp
-                let time = av_rescale_q(
-                    pts,
-                    stream.pointee.time_base,
-                    AVRational(num: 1, den: 1_000_000)
-                )
+                // packet 소유권 종료
+                var p: UnsafeMutablePointer<AVPacket>? = pkt
+                av_packet_free(&p)
 
-                let frameTime = Double(time) / 1_000_000
-                let delay = frameTime - self.clock.currentTime()
+                // receive frames
+                while receiveFrame(ctx: codecCtx, frame: frame) == 0 {
 
-                if delay > 0 {
-                    usleep(UInt32(delay * 1_000_000))
+                    // PTS → seconds
+                    let pts = frame.pointee.best_effort_timestamp
+                    if pts == Int64.min { continue }
+
+                    let timeUs = av_rescale_q(
+                        pts,
+                        stream.pointee.time_base,
+                        AVRational(num: 1, den: 1_000_000)
+                    )
+
+                    let frameTime = Double(timeUs) / 1_000_000
+                    let delay = frameTime - self.clock.currentTime()
+
+                    // AV Sync
+                    if delay > 0 {
+                        usleep(UInt32(delay * 1_000_000))
+                    }
+
+                    // render
+                    self.drawImage(frame)
                 }
-
-                self.drawImage(frame)
-                self.getCurrentTime()
-                
-                var f: UnsafeMutablePointer<AVFrame>? = frame
-                av_frame_free(&f)
             }
         }
     }
 
     private func startAudioRenderLoop() {
 
-        audioRenderQueue.async {
+        audioRenderStopped = false
 
-            while true {
+        audioRenderQueue.async { [weak self] in
+            guard let self else { return }
 
-                if self.clock.isPaused {
+            guard
+                let codecCtx = self.audioCodecCtx,
+                let frame = self.aFrame
+            else { return }
+
+            while !self.audioRenderStopped {
+
+                // pause 상태 → render만 멈춤
+                if self.isPaused {
                     usleep(10_000)
                     continue
                 }
 
-                guard let frame = self.audioQueue.pop(),
-                      let codecCtx = self.audioCodecCtx else {
-
-                    DispatchQueue.main.async { self.state = .buffering }
+                // packet pop
+                guard let pkt = self.audioPacketQueue.pop() else {
                     usleep(10_000)
                     continue
                 }
 
-                DispatchQueue.main.async { self.state = .bufferFinished }
+                // send packet
+                _ = sendPacket(ctx: codecCtx, packet: pkt)
 
-                // frame duration 계산
-                let nbSamples = frame.pointee.nb_samples
-                let sampleRate = codecCtx.pointee.sample_rate
-                let frameDuration = Double(nbSamples) / Double(sampleRate)
+                // packet free
+                var p: UnsafeMutablePointer<AVPacket>? = pkt
+                av_packet_free(&p)
 
-                // Audio buffer가 너무 많으면 속도 제한
-                if self.audioBufferedSeconds > self.AUDIO_BUFFER_TARGET {
-                    usleep(5_000)
-                    continue
+                // receive frames
+                while receiveFrame(ctx: codecCtx, frame: frame) == 0 {
+
+                    self.drawAudio(frame)
                 }
-
-                self.drawAudio(frame)
-                self.audioBufferedSeconds += frameDuration
-                
-                var f: UnsafeMutablePointer<AVFrame>? = frame
-                av_frame_free(&f)
             }
         }
     }
-
+    
     // MARK: - FFmpeg Functions
     
     private func readFrame(packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
@@ -649,6 +658,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
             print("FFmpeg## AVAudioPCMBuffer 생성 실패")
             return
         }
+        
+        clock.updateFromAudio(buffer)
+        
         buffer.frameLength = frameCount
 
         // FFmpeg → Float32 변환
@@ -766,15 +778,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
 
     private func clear() {
-        videoQueue.clear { frame in
-            var f: UnsafeMutablePointer<AVFrame>? = frame
-            av_frame_free(&f)
-        }
+        videoPacketQueue.abort()
+        audioPacketQueue.abort()
 
-        audioQueue.clear { frame in
-            var f: UnsafeMutablePointer<AVFrame>? = frame
-            av_frame_free(&f)
-        }
+        videoPacketQueue.flush()
+        audioPacketQueue.flush()
 
         if vFrame != nil { av_frame_free(&vFrame) }
         if aFrame != nil { av_frame_free(&aFrame) }

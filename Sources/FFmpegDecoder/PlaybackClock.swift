@@ -7,31 +7,51 @@
 
 import Foundation
 import QuartzCore
+import AVFAudio
 
 final class PlaybackClock {
-    private var startTime: Double = 0
-    private var pauseTime: Double = 0
-    private(set) var isPaused = true
+
+    private var startTime: CFTimeInterval = 0
+    private var pausedTime: CFTimeInterval = 0
+    private var accumulatedPause: CFTimeInterval = 0
+    private var isPaused = true
+    private var audioTime: Double = 0
+
+    // MARK: - Control
+
+    func reset() {
+        startTime = CACurrentMediaTime()
+        pausedTime = 0
+        accumulatedPause = 0
+        audioTime = 0
+        isPaused = true
+    }
 
     func play() {
-        startTime = CACurrentMediaTime() - pauseTime
+        guard isPaused else { return }
+        startTime = CACurrentMediaTime()
         isPaused = false
     }
 
     func pause() {
-        pauseTime = currentTime()
+        guard !isPaused else { return }
+        pausedTime = CACurrentMediaTime()
         isPaused = true
     }
 
+    // MARK: - Time
+
+    /// Audio render loop에서 호출
+    func updateFromAudio(_ buffer: AVAudioPCMBuffer) {
+        let duration =
+            Double(buffer.frameLength) /
+            buffer.format.sampleRate
+
+        audioTime += duration
+    }
+
+    /// Video render loop에서 사용
     func currentTime() -> Double {
-        isPaused
-            ? pauseTime
-            : CACurrentMediaTime() - startTime
-    }
-
-    func reset() {
-        startTime = 0
-        pauseTime = 0
-        isPaused = true
+        return audioTime
     }
 }
