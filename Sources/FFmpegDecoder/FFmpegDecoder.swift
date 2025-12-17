@@ -271,6 +271,12 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         while !decodingStopped {
                 
+            pauseCondition.lock()
+            while isPaused {
+                pauseCondition.wait()
+            }
+            pauseCondition.unlock()
+            
             // 버퍼가 가득 차면 디코딩 속도 제한
             if videoQueue.count >= videoQueue.maxSize ||
                audioQueue.count >= audioQueue.maxSize {
