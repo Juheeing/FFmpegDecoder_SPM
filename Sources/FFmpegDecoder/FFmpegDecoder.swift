@@ -423,7 +423,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 if state != .playedToTheEnd { state = .playedToTheEnd }
                 stopDecoding()
             } else {
-                if state != .error { state = .error }
+                //if state != .error { state = .error }
                 print("FFmpeg## readFrame error: \(ret)")
             }
         }
