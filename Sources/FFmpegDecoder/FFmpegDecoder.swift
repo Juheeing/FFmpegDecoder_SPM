@@ -74,8 +74,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private let audioRenderQueue = DispatchQueue(label: "ffmpeg.audio.render.queue")
     
     // MARK: - Buffer & Clock
-    private let videoQueue = FrameQueue<UnsafeMutablePointer<AVFrame>>(maxSize: 180)
-    private let audioQueue = FrameQueue<UnsafeMutablePointer<AVFrame>>(maxSize: 180)
+    private let videoQueue = FrameQueue<UnsafeMutablePointer<AVFrame>>(maxSize: 1800)
+    private let audioQueue = FrameQueue<UnsafeMutablePointer<AVFrame>>(maxSize: 1800)
     private let clock = PlaybackClock()
     
     private var audioBufferedSeconds: Double = 0
