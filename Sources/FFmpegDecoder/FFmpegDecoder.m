@@ -236,7 +236,11 @@
                     if (ret >= 0) {
                         [self getCurrentTime:vFrame stream:pVStream];
                         [self drawImage];
+                    } else {
+                        NSLog(@"FFmpeg## receiveFrame Error");
                     }
+                } else {
+                    NSLog(@"FFmpeg## sendPacket Error");
                 }
             }
             if (packet.stream_index == aidx) {
@@ -365,8 +369,6 @@
     currentTime = currentTime / 1000;
     duration = duration / 1000;
     
-    NSLog(@"🟢 현재 재생 시간: %lld 초 / 전체: %lld 초", currentTime, duration > 0 ? duration : 0);
-
     dispatch_sync(dispatch_get_main_queue(), ^{
         [self->_delegate receivedCurrentTime:currentTime duration:duration];
     });
