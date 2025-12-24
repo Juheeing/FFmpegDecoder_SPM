@@ -64,10 +64,10 @@
     if ([self.player isPlaying]) { [self.player stop]; }
 }
 
-- (void)startStreaming:(NSString *)url ipAddress:(NSString *)ipAddress withOptions:(NSDictionary<NSString *,NSString *> *)options {
+- (void)startStreaming:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options {
     decodingStopped = NO;
     dispatch_async(mDecodingQueue, ^{
-        [self openFile:url ipAddress:ipAddress withOptions:options];
+        [self openFile:url withOptions:options];
     });
 }
 
@@ -107,7 +107,7 @@
     });
 }
 
-- (void)openFile:(NSString *)url ipAddress:(NSString *)ipAddress withOptions:(NSDictionary<NSString *, NSString *> *)options {
+- (void)openFile:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options {
     NSLog(@"FFmpeg## openFile: %@", url);
     
     if (currentState != 0) { [self sendCurrentState:0]; }
@@ -121,7 +121,7 @@
         NSString *value = options[key];
         av_dict_set(&opts, [key UTF8String], [value UTF8String], 0);
     }
-    av_dict_set(&opts, "localaddr", [ipAddress UTF8String], 0);
+
     //미디어 파일 열기
     //파일의 헤더로 부터 파일 포맷에 대한 정보를 읽어낸 뒤 첫번째 인자 (AVFormatContext) 에 저장.
     //그 뒤의 인자들은 각각 Input Source (스트리밍 URL이나 파일경로), Input Format, demuxer의 추가옵션.
@@ -236,11 +236,7 @@
                     if (ret >= 0) {
                         [self getCurrentTime:vFrame stream:pVStream];
                         [self drawImage];
-                    } else {
-                        NSLog(@"FFmpeg## receiveFrame Error");
                     }
-                } else {
-                    NSLog(@"FFmpeg## sendPacket Error");
                 }
             }
             if (packet.stream_index == aidx) {
