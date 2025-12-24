@@ -365,6 +365,8 @@
     currentTime = currentTime / 1000;
     duration = duration / 1000;
     
+    NSLog(@"FFmpeg## currentTime %lld, duration %lld", currentTime, duration);
+    
     dispatch_sync(dispatch_get_main_queue(), ^{
         [self->_delegate receivedCurrentTime:currentTime duration:duration];
     });
