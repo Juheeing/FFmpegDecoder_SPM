@@ -23,9 +23,7 @@
 @property (nonatomic, strong)AVAudioEngine *engine;
 @property (nonatomic, strong)AVAudioPlayerNode *player;
 
-- (void)startStreaming:(NSString *)url
-             ipAddress:(NSString *)ipAddress
-           withOptions:(NSDictionary<NSString *, NSString *> *)options;
+- (void) startStreaming:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options;
 - (void) stopDecoding;
 - (void) pause;
 - (void) resume;
