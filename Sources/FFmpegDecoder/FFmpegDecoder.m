@@ -64,6 +64,11 @@
     if ([self.player isPlaying]) { [self.player stop]; }
 }
 
+static int ffmpeg_interrupt_cb(void *ctx) {
+    FFmpegDecoder *decoder = (__bridge FFmpegDecoder *)ctx;
+    return decoder->decodingStopped ? 1 : 0;
+}
+
 - (void)startStreaming:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options {
     decodingStopped = NO;
     dispatch_async(mDecodingQueue, ^{
@@ -114,6 +119,8 @@
     av_log_set_level(AV_LOG_DEBUG);
     avformat_network_init();
     pFormatContext = avformat_alloc_context();
+    pFormatContext->interrupt_callback.callback = ffmpeg_interrupt_cb;
+    pFormatContext->interrupt_callback.opaque = (__bridge void *)self;
     
     AVDictionary *opts = 0;
     
@@ -362,7 +369,7 @@
         duration = av_rescale_q(pFormatContext->duration, AV_TIME_BASE_Q, (AVRational){1, 1000});
     }
 
-    NSLog(@"FFmpeg## currentTime %lld, duration %lld", currentTime, duration);
+    //NSLog(@"FFmpeg## currentTime %lld, duration %lld", currentTime, duration);
     
     currentTime = currentTime / 1000;
     duration = duration / 1000;
