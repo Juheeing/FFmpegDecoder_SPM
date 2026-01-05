@@ -1,0 +1,93 @@
+--- libavformat/tcp.c
++++ libavformat/tcp.c
+@@ -32,6 +32,9 @@
+ #include <poll.h>
+ #endif
+ 
++#include <arpa/inet.h>
++#include <netinet/in.h>
++
+ typedef struct TCPContext {
+     const AVClass *class;
+     int fd;
+@@ -102,7 +105,12 @@
+ /* return non zero if error */
+ static int tcp_open(URLContext *h, const char *uri, int flags)
+ {
+-    struct addrinfo hints = { 0 }, *ai, *cur_ai;
++    struct addrinfo hints = { 0 }, *ai = NULL, *cur_ai = NULL;
++
++    struct addrinfo inet_v4 = { 0 };
++    struct sockaddr_in sa4 = { 0 };
++    int is_ai_from_getaddrinfo = 1;
++
+     int port, fd = -1;
+     TCPContext *s = h->priv_data;
+     const char *p;
+@@ -148,10 +156,35 @@
+     snprintf(portstr, sizeof(portstr), "%d", port);
+     if (s->listen)
+         hints.ai_flags |= AI_PASSIVE;
+-    if (!hostname[0])
++
++    if (!hostname[0]) {
+         ret = getaddrinfo(NULL, portstr, &hints, &ai);
+-    else
++        is_ai_from_getaddrinfo = 1;
++    } else if (inet_pton(AF_INET, hostname, &sa4.sin_addr) == 1) {
++
++        // IPv4 리터럴 fast-path:
++        // iOS에서는 통신사/기지국 환경에 따라 getaddrinfo()가
++        // 로컬(RFC1918) IPv4 주소를 DNS64/NAT64 기반 IPv6 주소로
++        // 변환하는 경우가 있으므로, IPv4 리터럴인 경우 resolver를 사용하지 않는다.
++
++        sa4.sin_family = AF_INET;
++        sa4.sin_port   = htons(port);
++
++        inet_v4.ai_family   = AF_INET;
++        inet_v4.ai_socktype = SOCK_STREAM;
++        inet_v4.ai_protocol = IPPROTO_TCP;
++        inet_v4.ai_addr     = (struct sockaddr *)&sa4;
++        inet_v4.ai_addrlen  = sizeof(sa4);
++        inet_v4.ai_next     = NULL;
++
++        ai = &inet_v4;
++        is_ai_from_getaddrinfo = 0;
++        ret = 0;
++    } else {
+         ret = getaddrinfo(hostname, portstr, &hints, &ai);
++        is_ai_from_getaddrinfo = 1;
++    }
++
+     if (ret) {
+         av_log(h, AV_LOG_ERROR,
+                "Failed to resolve hostname %s: %s\n",
+@@ -163,7 +196,7 @@
+ 
+ #if HAVE_STRUCT_SOCKADDR_IN6
+     // workaround for IOS9 getaddrinfo in IPv6 only network use hardcode IPv4 address can not resolve port number.
+-    if (cur_ai->ai_family == AF_INET6){
++    if (cur_ai && cur_ai->ai_family == AF_INET6){
+         struct sockaddr_in6 * sockaddr_v6 = (struct sockaddr_in6 *)cur_ai->ai_addr;
+         if (!sockaddr_v6->sin6_port){
+             sockaddr_v6->sin6_port = htons(port);
+@@ -206,13 +239,17 @@
+     h->is_streamed = 1;
+     s->fd = fd;
+ 
+-    freeaddrinfo(ai);
++    if (is_ai_from_getaddrinfo && ai)
++        freeaddrinfo(ai);
++
+     return 0;
+ 
+  fail1:
+     if (fd >= 0)
+         closesocket(fd);
+-    freeaddrinfo(ai);
++    if (is_ai_from_getaddrinfo && ai)
++        freeaddrinfo(ai);
++
+     return ret;
+ }
+ 
