@@ -53,7 +53,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - State
     private var decodingStopped = false
     private var isPaused = false
-    private var isStopped = false
 
     // MARK: - Video Convert
     private var swsCtx: OpaquePointer?
@@ -68,20 +67,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     // MARK: - Pause Condition
     private let pauseCondition = NSCondition()
-    
-    // MARK: - Thread
-    private let demuxQueue = DispatchQueue(label: "ffmpeg.demux")
-    private let videoQueue = DispatchQueue(label: "ffmpeg.video")
-    private let audioQueue = DispatchQueue(label: "ffmpeg.audio")
-    
-    // MARK: - Buffer & Clock
-    private let videoPktQueue = PacketQueue(maxSize: 300)
-    private let audioPktQueue = PacketQueue(maxSize: 300)
-    private let audioClock = AudioClock()
-    
-    private var audioBufferedSeconds: Double = 0
-    private let AUDIO_BUFFER_TARGET: Double = 0.8   // 800ms
-    private let AUDIO_BUFFER_MIN: Double = 0.2       // underrun 기준
+
+    // 디코딩 스레드
+    private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
     
     public init() {
         avformat_network_init()
@@ -92,116 +80,12 @@ public final class FFmpegDecoder: @unchecked Sendable {
     public func open(url: String) {
         state = .preparing
 
-        demuxQueue.async { self.demuxLoop(url: url) }
-    }
-    
-    // MARK: - Demux
-    private func demuxLoop(url: String) {
-        avformat_network_init()
-        var ctx: UnsafeMutablePointer<AVFormatContext>?
-        avformat_open_input(&ctx, url, nil, nil)
-        avformat_find_stream_info(ctx, nil)
-        formatCtx = ctx
-
-        for i in 0..<Int(ctx!.pointee.nb_streams) {
-            let st = ctx!.pointee.streams[i]!
-            if st.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_VIDEO && videoStreamIndex == -1 {
-                videoStreamIndex = Int32(i)
-                videoStream = st
-                openVideoCodec(st)
-            }
-            if st.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_AUDIO && audioStreamIndex == -1 {
-                audioStreamIndex = Int32(i)
-                audioStream = st
-                openAudioCodec(st)
-            }
+        decodeQueue.async {
+            self.openFileInternal(url: url)
         }
-
-        videoQueue.async { self.videoLoop() }
-        audioQueue.async { self.audioLoop() }
-
-        var pkt = av_packet_alloc()
-        while !isStopped {
-            if av_read_frame(ctx, pkt) < 0 { continue }
-            if pkt!.pointee.stream_index == videoStreamIndex {
-                _ = videoPktQueue.push(pkt!)
-            } else if pkt!.pointee.stream_index == audioStreamIndex {
-                _ = audioPktQueue.push(pkt!)
-            }
-            av_packet_unref(pkt)
-        }
-        av_packet_free(&pkt)
-    }
-    
-    // MARK: - Video Loop
-    private func videoLoop() {
-        var frame = av_frame_alloc()
-        while !isStopped {
-            if isPaused { usleep(10_000); continue }
-            guard let pkt = videoPktQueue.pop() else { continue }
-            if avcodec_send_packet(videoCodecCtx, pkt) >= 0 {
-                while avcodec_receive_frame(videoCodecCtx, frame) >= 0 {
-                    guard let pts = frame?.pointee.best_effort_timestamp else { return }
-                    let time = ptsToSeconds(pts, videoStream!)
-                    let delay = time - audioClock.current
-                    if delay < -0.05 { continue } // drop
-                    if delay > 0 { usleep(UInt32(delay * 1_000_000)) }
-                    drawImage(frame)
-                }
-            }
-            var p: UnsafeMutablePointer<AVPacket>? = pkt
-            av_packet_free(&p)
-        }
-        av_frame_free(&frame)
     }
 
-    // MARK: - Audio Loop (MASTER)
-    private func audioLoop() {
-        var frame = av_frame_alloc()
-        while !isStopped {
-            if isPaused { usleep(10_000); continue }
-            guard let pkt = audioPktQueue.pop() else { continue }
-            if avcodec_send_packet(audioCodecCtx, pkt) >= 0 {
-                while avcodec_receive_frame(audioCodecCtx, frame) >= 0 {
-                    guard let pts = frame?.pointee.best_effort_timestamp else { return }
-                    let time = ptsToSeconds(pts, audioStream!)
-                    audioClock.update(time)
-                    drawAudio(frame)
-                }
-            }
-            var p: UnsafeMutablePointer<AVPacket>? = pkt
-            av_packet_free(&p)
-        }
-        av_frame_free(&frame)
-    }
-
-    // MARK: - Codec Open
-    private func openVideoCodec(_ st: UnsafeMutablePointer<AVStream>) {
-        let codec = avcodec_find_decoder(st.pointee.codecpar.pointee.codec_id)
-        videoCodecCtx = avcodec_alloc_context3(codec)
-        avcodec_parameters_to_context(videoCodecCtx, st.pointee.codecpar)
-        avcodec_open2(videoCodecCtx, codec, nil)
-    }
-
-    private func openAudioCodec(_ st: UnsafeMutablePointer<AVStream>) {
-        let codec = avcodec_find_decoder(st.pointee.codecpar.pointee.codec_id)
-        audioCodecCtx = avcodec_alloc_context3(codec)
-        avcodec_parameters_to_context(audioCodecCtx, st.pointee.codecpar)
-        avcodec_open2(audioCodecCtx, codec, nil)
-    }
-    
-    private func ptsToSeconds(_ pts: Int64, _ stream: UnsafeMutablePointer<AVStream>) -> Double {
-        let AV_NOPTS_VALUE: Int64 = Int64.min
-        
-        if pts == AV_NOPTS_VALUE {
-            return 0
-        }
-
-        let timeBase = stream.pointee.time_base
-        return Double(pts) * Double(timeBase.num) / Double(timeBase.den)
-    }
-
-    /*private func openFileInternal(url: String) {
+    private func openFileInternal(url: String) {
         print("FFmpeg## openFileInternal: \(url)")
         
         var fmtCtx: UnsafeMutablePointer<AVFormatContext>? = avformat_alloc_context()
@@ -274,12 +158,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         print("FFmpeg## 디코딩 준비 완료 → readyToPlay")
         state = .readyToPlay
-
-        clock.reset()
-        clock.play()
-
-        startVideoRenderLoop()
-        startAudioRenderLoop()
         
         decoding()
     }
@@ -366,24 +244,37 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
     // MARK: - Decoding Loop
     
-    private func decoding() {
+    func decoding() {
 
         pktPtr = av_packet_alloc()
         vFrame = av_frame_alloc()
         aFrame = av_frame_alloc()
         
-        guard let pktPtr else { return }
+        guard let pktPtr = pktPtr else {
+            print("FFmpeg## alloc fail")
+            stopDecoding()
+            return
+        }
         
         while !decodingStopped {
                 
-            // 버퍼가 가득 차면 디코딩 속도 제한
-            if videoQueue.count >= videoQueue.maxSize ||
-               audioQueue.count >= audioQueue.maxSize {
-                usleep(10_000)
-                continue
+            pauseCondition.lock()
+            while isPaused {
+                if state != .paused {
+                    player?.pause()
+                    engine?.pause()
+                    _ = readPause()
+                }
+                pauseCondition.wait()
+            }
+            pauseCondition.unlock()
+
+            if state == .paused {
+                _ = readPlay()
             }
         
-            if readFrame(packet: pktPtr) < 0 {
+            let readRet = readFrame(packet: pktPtr)
+            if readRet < 0 {
                 av_packet_unref(pktPtr)
                 continue
             }
@@ -392,127 +283,42 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
             if streamIndex == videoStreamIndex {
 
-                if sendPacket(ctx: videoCodecCtx, packet: pktPtr) >= 0 {
-                    
-                    while receiveFrame(ctx: videoCodecCtx, frame: vFrame) >= 0 {
+                let sendRet = sendPacket(ctx: videoCodecCtx, packet: pktPtr)
+
+                if sendRet >= 0 {
+                    while true {
+                        let recvRet = receiveFrame(ctx: videoCodecCtx, frame: vFrame)
                         
-                        if let cloned = av_frame_clone(vFrame) {
-                            if !videoQueue.push(cloned) {
-                                var f: UnsafeMutablePointer<AVFrame>? = cloned
-                                av_frame_free(&f)
-                            }
-                        }
+                        if recvRet < 0 { break }
+            
+                        getCurrentTime(frame: vFrame, stream: videoStream)
+                        drawImage()
                     }
                 }
-                
             } else if streamIndex == audioStreamIndex {
 
-                if sendPacket(ctx: audioCodecCtx, packet: pktPtr) >= 0 {
-                    
-                    while receiveFrame(ctx: audioCodecCtx, frame: aFrame) >= 0 {
-                        
-                        if let cloned = av_frame_clone(aFrame) {
-                            if !audioQueue.push(cloned) {
-                                var f: UnsafeMutablePointer<AVFrame>? = cloned
-                                av_frame_free(&f)
-                            }
-                        }
+                let sendRet = sendPacket(ctx: audioCodecCtx, packet: pktPtr)
+
+                if sendRet >= 0 {
+                    while true {
+                        let recvRet = receiveFrame(ctx: audioCodecCtx, frame: aFrame)
+
+                        if recvRet < 0 { break }
+
+                        drawAudio()
                     }
                 }
             }
 
             av_packet_unref(pktPtr)
+
         }
         clear()
-    }
-    
-    // MARK: - Rendering
-    
-    private func startVideoRenderLoop() {
-        videoRenderQueue.async {
-            while true {
-
-                if self.clock.isPaused {
-                    usleep(10_000)
-                    continue
-                }
-
-                guard let frame = self.videoQueue.pop(),
-                      let stream = self.videoStream else {
-                    DispatchQueue.main.async { self.state = .buffering }
-                    usleep(10_000)
-                    continue
-                }
-
-                DispatchQueue.main.async { self.state = .bufferFinished }
-
-                let pts = frame.pointee.best_effort_timestamp
-                let time = av_rescale_q(
-                    pts,
-                    stream.pointee.time_base,
-                    AVRational(num: 1, den: 1_000_000)
-                )
-
-                let frameTime = Double(time) / 1_000_000
-                let delay = frameTime - self.clock.currentTime()
-
-                if delay > 0 {
-                    usleep(UInt32(delay * 1_000_000))
-                }
-
-                self.drawImage(frame)
-                self.getCurrentTime()
-                
-                var f: UnsafeMutablePointer<AVFrame>? = frame
-                av_frame_free(&f)
-            }
-        }
-    }
-
-    private func startAudioRenderLoop() {
-
-        audioRenderQueue.async {
-
-            while true {
-
-                if self.clock.isPaused {
-                    usleep(10_000)
-                    continue
-                }
-
-                guard let frame = self.audioQueue.pop(),
-                      let codecCtx = self.audioCodecCtx else {
-
-                    DispatchQueue.main.async { self.state = .buffering }
-                    usleep(10_000)
-                    continue
-                }
-
-                DispatchQueue.main.async { self.state = .bufferFinished }
-
-                // frame duration 계산
-                let nbSamples = frame.pointee.nb_samples
-                let sampleRate = codecCtx.pointee.sample_rate
-                let frameDuration = Double(nbSamples) / Double(sampleRate)
-
-                // Audio buffer가 너무 많으면 속도 제한
-                if self.audioBufferedSeconds > self.AUDIO_BUFFER_TARGET {
-                    usleep(5_000)
-                    continue
-                }
-
-                self.drawAudio(frame)
-                self.audioBufferedSeconds += frameDuration
-                
-                var f: UnsafeMutablePointer<AVFrame>? = frame
-                av_frame_free(&f)
-            }
-        }
     }
 
     // MARK: - FFmpeg Functions
     
-    private func readFrame(packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
+    func readFrame(packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
         guard let fmt = formatCtx else {
             if state != .error { state = .error }
             print("FFmpeg## readFrame: formatCtx is nil")
@@ -525,17 +331,17 @@ public final class FFmpegDecoder: @unchecked Sendable {
             if ret == EOF {
                 print("FFmpeg## readFrame: EOF reached")
                 if state != .playedToTheEnd { state = .playedToTheEnd }
-                decodingStopped = true
+                stopDecoding()
             } else {
+                if state != .error { state = .error }
                 print("FFmpeg## readFrame error: \(ret)")
-                decodingStopped = true
             }
         }
 
         return ret
     }
 
-    private func sendPacket(ctx: UnsafeMutablePointer<AVCodecContext>?,
+    func sendPacket(ctx: UnsafeMutablePointer<AVCodecContext>?,
                     packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
 
         guard let ctx else {
@@ -563,28 +369,72 @@ public final class FFmpegDecoder: @unchecked Sendable {
         return ret
     }
     
+    func readPlay() -> Int32 {
+        guard let fmt = formatCtx else { return -1 }
+
+        let ret = av_read_play(fmt)
+
+        if ret >= 0 {
+            if state != .readyToPlay { state = .readyToPlay }
+        } else {
+            if state != .error { state = .error }
+            print("FFmpeg## av_read_play error: \(ret)")
+        }
+        return ret
+    }
+
+    func readPause() -> Int32 {
+        guard let fmt = formatCtx else { return -1 }
+
+        let ret = av_read_pause(fmt)
+
+        if ret >= 0 {
+            if state != .paused { state = .paused }
+        } else {
+            if state != .error { state = .error }
+            print("FFmpeg## av_read_pause error: \(ret)")
+        }
+
+        return ret
+    }
+    
     // MARK: - Get Current Time
     
-    private func getCurrentTime() {
-        let seconds = Int64(clock.currentTime())
-        
-        DispatchQueue.main.async {
-            self.delegate?.decoder(
-                self,
-                didUpdateCurrentTime: seconds,
-                duration: self.durationMs / 1000
-            )
-        }
-    }*/
-    
-    // MARK: - Draw Image
-    
-    private func drawImage(_ frame: UnsafeMutablePointer<AVFrame>?) {
+    private func getCurrentTime(frame: UnsafeMutablePointer<AVFrame>?,
+                        stream: UnsafeMutablePointer<AVStream>?) {
+
         guard let frame = frame else { return }
 
-        let srcWidth = Int(frame.pointee.width)
-        let srcHeight = Int(frame.pointee.height)
-        let srcFormat = AVPixelFormat(rawValue: frame.pointee.format)
+        let streamRef = stream ?? videoStream
+        guard let stream = streamRef else { return }
+        
+        let AV_NOPTS_VALUE: Int64 = Int64.min
+        var pts = frame.pointee.best_effort_timestamp
+        
+        if pts == AV_NOPTS_VALUE {
+            pts = frame.pointee.pts
+            
+            if pts == AV_NOPTS_VALUE {
+                return
+            }
+        }
+        
+        let ms = av_rescale_q(pts, stream.pointee.time_base, AVRational(num: 1, den: 1000))
+        let seconds = Double(ms) / 1000.0
+        
+        DispatchQueue.main.sync {
+            self.delegate?.decoder(self, didUpdateCurrentTime: Int64(seconds), duration: self.durationMs / 1000)
+        }
+    }
+
+    // MARK: - Draw Image
+    
+    private func drawImage() {
+        guard let vFrame = vFrame else { return }
+
+        let srcWidth = Int(vFrame.pointee.width)
+        let srcHeight = Int(vFrame.pointee.height)
+        let srcFormat = AVPixelFormat(rawValue: vFrame.pointee.format)
         let dstFormat = AV_PIX_FMT_BGRA // BGRA -> CGImage/CIImage에 적합
 
         // prepare swsCtx and dst buffers once
@@ -627,25 +477,25 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         // MARK: - 튜플 → 배열 변환
         let srcDataArray: [UnsafePointer<UInt8>?] = [
-            frame.pointee.data.0.map { UnsafePointer($0) },
-            frame.pointee.data.1.map { UnsafePointer($0) },
-            frame.pointee.data.2.map { UnsafePointer($0) },
-            frame.pointee.data.3.map { UnsafePointer($0) },
-            frame.pointee.data.4.map { UnsafePointer($0) },
-            frame.pointee.data.5.map { UnsafePointer($0) },
-            frame.pointee.data.6.map { UnsafePointer($0) },
-            frame.pointee.data.7.map { UnsafePointer($0) }
+            vFrame.pointee.data.0.map { UnsafePointer($0) },
+            vFrame.pointee.data.1.map { UnsafePointer($0) },
+            vFrame.pointee.data.2.map { UnsafePointer($0) },
+            vFrame.pointee.data.3.map { UnsafePointer($0) },
+            vFrame.pointee.data.4.map { UnsafePointer($0) },
+            vFrame.pointee.data.5.map { UnsafePointer($0) },
+            vFrame.pointee.data.6.map { UnsafePointer($0) },
+            vFrame.pointee.data.7.map { UnsafePointer($0) }
         ]
 
         let srcLinesizeArray: [Int32] = [
-            frame.pointee.linesize.0,
-            frame.pointee.linesize.1,
-            frame.pointee.linesize.2,
-            frame.pointee.linesize.3,
-            frame.pointee.linesize.4,
-            frame.pointee.linesize.5,
-            frame.pointee.linesize.6,
-            frame.pointee.linesize.7
+            vFrame.pointee.linesize.0,
+            vFrame.pointee.linesize.1,
+            vFrame.pointee.linesize.2,
+            vFrame.pointee.linesize.3,
+            vFrame.pointee.linesize.4,
+            vFrame.pointee.linesize.5,
+            vFrame.pointee.linesize.6,
+            vFrame.pointee.linesize.7
         ]
 
         // MARK: - sws_scale 호출
@@ -714,8 +564,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     // MARK: - Draw Audio
     
-    private func drawAudio(_ frame: UnsafeMutablePointer<AVFrame>?) {
-        guard let frame = frame?.pointee,
+    private func drawAudio() {
+        guard let aFrame = aFrame?.pointee,
               let audioCodecCtx = audioCodecCtx?.pointee else {
             print("FFmpeg## drawAudio: aFrame 또는 audioCodecCtx nil")
             return
@@ -732,8 +582,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         let sampleRate = Double(audioCodecCtx.sample_rate)
         let channels = Int(audioCodecCtx.ch_layout.nb_channels)
-        let frameCount = AVAudioFrameCount(frame.nb_samples)
-        let frameDuration = Double(frame.nb_samples) / sampleRate
+        let frameCount = AVAudioFrameCount(aFrame.nb_samples)
 
         // sample format
         let sampleFormat = audioCodecCtx.sample_fmt
@@ -762,10 +611,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
             let outPtr = buffer.floatChannelData![ch]
             
             if isPlanar {
-                guard let inPtr = frameDataPointer(frame, channel: ch) else { continue }
+                guard let inPtr = frameDataPointer(aFrame, channel: ch) else { continue }
                 memcpy(outPtr, inPtr, Int(frameCount) * Int(bytesPerSample))
             } else {
-                guard let basePtr = frameDataPointer(frame, channel: 0) else { return }
+                guard let basePtr = frameDataPointer(aFrame, channel: 0) else { return }
 
                 let inPtr = UnsafeMutableRawPointer(basePtr)
                     .assumingMemoryBound(to: Float.self)
@@ -776,9 +625,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
             }
         }
 
-        player.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
-            self?.audioBufferedSeconds -= frameDuration
-        }
+        player.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
 
         if !engine.isRunning {
             do {
@@ -843,26 +690,32 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
     public func pause() {
         if isPaused { return }
+        
+        pauseCondition.lock()
         isPaused = true
-        player?.pause()
-        state = .paused
+
+        pauseCondition.signal()
+        pauseCondition.unlock()
         
         print("FFmpeg## Pause")
     }
 
     public func resume() {
         if !isPaused { return }
-        isPaused = false
-        player?.play()
-        state = .readyToPlay
         
+        pauseCondition.lock()
+        isPaused = false
+            
+        pauseCondition.signal()
+        pauseCondition.unlock()
         print("FFmpeg## Resume")
     }
 
-    public func stop() {
-        isStopped = true
+    public func stopDecoding() {
+        pauseCondition.lock()
         decodingStopped = true
-        
+        pauseCondition.signal()
+        pauseCondition.unlock()
         print("FFmpeg## stopDecoding requested")
     }
     
@@ -870,16 +723,41 @@ public final class FFmpegDecoder: @unchecked Sendable {
         !isPaused
     }
 
-    private func clear() {
-        if vFrame != nil { av_frame_free(&vFrame) }
-        if aFrame != nil { av_frame_free(&aFrame) }
-        if videoCodecCtx != nil { avcodec_free_context(&videoCodecCtx) }
-        if audioCodecCtx != nil { avcodec_free_context(&audioCodecCtx) }
-        if formatCtx != nil { avformat_close_input(&formatCtx) }
-        if let s = swsCtx { sws_freeContext(s); swsCtx = nil }
-        if pktPtr != nil { av_packet_free(&pktPtr) }
+    func clear() {
 
-        
+        if vFrame != nil {
+            av_frame_free(&vFrame)
+        }
+        if aFrame != nil {
+            av_frame_free(&aFrame)
+        }
+
+        if videoCodecCtx != nil {
+            avcodec_free_context(&videoCodecCtx)
+        }
+        if audioCodecCtx != nil {
+            avcodec_free_context(&audioCodecCtx)
+        }
+
+        if formatCtx != nil {
+            avformat_close_input(&formatCtx)
+        }
+
+        if swsCtx != nil {
+            sws_freeContext(swsCtx)
+            swsCtx = nil
+        }
+
+        if pktPtr != nil {
+            av_packet_free(&pktPtr)
+            pktPtr = nil
+        }
+
+        player?.stop()
+        engine?.stop()
+        player = nil
+        engine = nil
+
         print("FFmpeg## clear")
     }
 
