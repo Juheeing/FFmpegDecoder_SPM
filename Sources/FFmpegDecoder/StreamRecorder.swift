@@ -16,7 +16,7 @@ public final class StreamRecorder: @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "ffmpeg.recorder")
 
-    func start(rtspUrl: String, outputPath: String) {
+    public func start(rtspUrl: String, outputPath: String) {
 
         queue.async { [weak self] in
             guard let self else { return }
@@ -24,7 +24,7 @@ public final class StreamRecorder: @unchecked Sendable {
         }
     }
     
-    func stop() {
+    public func stop() {
         recording = false
     }
     
