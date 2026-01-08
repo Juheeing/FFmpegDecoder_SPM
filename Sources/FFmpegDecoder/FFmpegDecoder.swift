@@ -267,9 +267,12 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
             pauseCondition.lock()
             while isPaused {
+                if state != .paused { state = .paused }
                 pauseCondition.wait()
             }
             pauseCondition.unlock()
+            
+            if state != .readyToPlay { state = .readyToPlay }
 
             guard let pkt = packetBuffer.pop() else {
                 usleep(10_000)
