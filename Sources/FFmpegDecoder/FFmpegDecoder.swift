@@ -274,10 +274,12 @@ public final class FFmpegDecoder: @unchecked Sendable {
             
             if state != .readyToPlay { state = .readyToPlay }
 
-            guard let pkt = packetBuffer.pop() else {
-                usleep(10_000)
-                continue
-            }
+            guard let item = packetBuffer.pop() else {
+                        usleep(10_000)
+                        continue
+                    }
+
+            guard let pkt = item.pkt else { return }
 
             processPacket(pkt)
 
@@ -672,10 +674,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
 
     public func stopDecoding() {
-        pauseCondition.lock()
+        readStopped = true
         decodingStopped = true
-        pauseCondition.signal()
-        pauseCondition.unlock()
+        packetBuffer.clear()
         print("FFmpeg## stopDecoding requested")
     }
     
@@ -683,7 +684,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
         !isPaused
     }
 
-    func clear() {
+    private func clear() {
+        
+        packetBuffer.clear()
 
         if vFrame != nil {
             av_frame_free(&vFrame)
@@ -712,6 +715,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
             av_packet_free(&pktPtr)
             pktPtr = nil
         }
+        
+        if let buf = dstBuffer { av_free(buf); dstBuffer = nil }
 
         player?.stop()
         engine?.stop()

@@ -10,59 +10,74 @@ import FFmpegHeaders
 
 final class PacketRingBuffer {
 
-    struct Item {
-        let pkt: UnsafeMutablePointer<AVPacket>
+    final class Item {
+        var pkt: UnsafeMutablePointer<AVPacket>?
         let ptsMs: Int64
         let isKey: Bool
-    }
-
-    private var items: [Item] = []
-    private let maxDurationMs: Int64 = 90_000   // 90초 타임시프트
-
-    private let lock = NSLock()
-
-    func push(_ pkt: UnsafeMutablePointer<AVPacket>, ptsMs: Int64, isKey: Bool) {
-        lock.lock()
-        let clone = av_packet_clone(pkt)!
-        items.append(Item(pkt: clone, ptsMs: ptsMs, isKey: isKey))
-        trimIfNeeded(currentPts: ptsMs)
-        lock.unlock()
-    }
-
-    func pop() -> UnsafeMutablePointer<AVPacket>? {
-        lock.lock()
-        defer { lock.unlock() }
-
-        guard !items.isEmpty else { return nil }
-        return items.removeFirst().pkt
-    }
-
-    func clear() {
-        lock.lock()
-        for i in items {
-            var p: UnsafeMutablePointer<AVPacket>? = i.pkt
-            av_packet_free(&p)
+        
+        init(pkt: UnsafeMutablePointer<AVPacket>, ptsMs: Int64, isKey: Bool) {
+            self.pkt = pkt
+            self.ptsMs = ptsMs
+            self.isKey = isKey
         }
-        items.removeAll()
+    }
+
+    private var buffer: [Item] = []
+    private let maxCount = 3600
+    private let lock = NSLock()
+    
+    func push(_ pkt: UnsafeMutablePointer<AVPacket>, ptsMs: Int64, isKey: Bool) {
+
+        // 반드시 clone/ref 해서 소유권 분리
+        guard let copy = av_packet_clone(pkt) else { return }
+
+        let item = Item(pkt: copy, ptsMs: ptsMs, isKey: isKey)
+
+        lock.lock()
+        buffer.append(item)
+
+        if buffer.count > maxCount {
+            let drop = buffer.removeFirst()
+            av_packet_free(&drop.pkt)
+            drop.pkt = nil
+        }
         lock.unlock()
     }
 
-    private func trimIfNeeded(currentPts: Int64) {
+    func pop() -> Item? {
+        lock.lock()
+        let item = buffer.isEmpty ? nil : buffer.removeFirst()
+        lock.unlock()
+        return item
+    }
 
-        // keyframe 기준으로 trim (seek 안전)
-        while items.count > 2 {
-            let first = items[0]
-            if currentPts - first.ptsMs > maxDurationMs {
-                if items[1].isKey {
-                    var p: UnsafeMutablePointer<AVPacket>? = first.pkt
-                    av_packet_free(&p)
-                    items.removeFirst()
-                } else {
-                    break
-                }
-            } else {
+    func dropUntilLatestKeyframe() {
+        lock.lock()
+        var lastKeyIndex: Int?
+
+        for i in stride(from: buffer.count - 1, through: 0, by: -1) {
+            if buffer[i].isKey {
+                lastKeyIndex = i
                 break
             }
         }
+
+        if let idx = lastKeyIndex, idx > 0 {
+            for i in 0..<idx {
+                av_packet_free(&buffer[i].pkt)
+            }
+            buffer.removeFirst(idx)
+        }
+        lock.unlock()
+    }
+    
+    func clear() {
+        lock.lock()
+        for i in 0..<buffer.count {
+            av_packet_free(&buffer[i].pkt)
+            buffer[i].pkt = nil
+        }
+        buffer.removeAll()
+        lock.unlock()
     }
 }
