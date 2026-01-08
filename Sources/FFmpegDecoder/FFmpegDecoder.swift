@@ -129,15 +129,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
             }
         }
 
-        // duration 계산
-        let duration = fmt.pointee.duration
-        let AV_TIME_BASE_Q = AVRational(num: 1, den: Int32(AV_TIME_BASE))
-        //let AV_TIME_BASE_Q = av_make_q(1, AV_TIME_BASE)
-
-        if duration > 0 {
-            durationMs = Int64(av_rescale_q(duration, AV_TIME_BASE_Q, AVRational(num: 1, den: 1000)))
-        }
-
         prepareVideoDecoder()
         if audioStreamIndex >= 0 { prepareAudioDecoder() }
 
