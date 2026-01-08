@@ -419,7 +419,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         let ms = av_rescale_q(pts, stream.pointee.time_base, AVRational(num: 1, den: 1000))
         let seconds = Double(ms) / 1000.0
         
-        DispatchQueue.main.sync {
+        DispatchQueue.main.async {
             self.delegate?.decoder(self, didUpdateCurrentTime: Int64(seconds), duration: self.durationMs / 1000)
         }
     }
@@ -554,7 +554,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         let ciImage = CIImage(cgImage: cgImage)
 
-        DispatchQueue.main.sync {
+        DispatchQueue.main.async {
             self.delegate?.decoder(self, didReceiveDecodedImage: ciImage)
         }
     }
