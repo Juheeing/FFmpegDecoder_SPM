@@ -68,6 +68,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - Pause Condition
     private let pauseCondition = NSCondition()
 
+    // MARK: - Segment Buffer
+    private var segmentQueue: [String] = []
+    private let segmentLock = NSLock()
+    
     // 디코딩 스레드
     private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
     
@@ -75,91 +79,81 @@ public final class FFmpegDecoder: @unchecked Sendable {
         avformat_network_init()
     }
 
+    public func appendSegment(_ path: String) {
+        segmentLock.lock()
+        segmentQueue.append(path)
+        segmentLock.unlock()
+    }
+    
+    private func nextSegment() -> String? {
+        segmentLock.lock()
+        defer { segmentLock.unlock() }
+        if segmentQueue.isEmpty { return nil }
+        return segmentQueue.removeFirst()
+    }
+    
     // MARK: - Open File
     
-    public func open(url: String) {
+    public func open() {
         state = .preparing
 
         decodeQueue.async {
-            self.openFileInternal(url: url)
+            self.decoding()
         }
     }
 
     private func openFileInternal(url: String) {
-        print("FFmpeg## openFileInternal: \(url)")
-        
-        var fmtCtx: UnsafeMutablePointer<AVFormatContext>? = avformat_alloc_context()
 
-        // 파일 열기
-        var options: OpaquePointer? = nil
-        av_dict_set(&options, "rtsp_transport", "tcp", 0)
+        print("Decoder## open segment:", url)
 
-        let openResult = avformat_open_input(&fmtCtx, url, nil, &options)
-        if openResult != 0 {
-            print("FFmpeg## avformat_open_input 실패: \(openResult)")
-            state = .error
-            return
-        }
-        print("FFmpeg## avformat_open_input 성공")
-        
-        guard let formatCtx = fmtCtx else {
-            print("FFmpeg## formatCtx nil")
-            return
-        }
-        self.formatCtx = formatCtx
+        var fmt: UnsafeMutablePointer<AVFormatContext>?
+        if avformat_open_input(&fmt, url, nil, nil) < 0 { return }
 
-        // 스트림 정보 읽기
-        let infoResult = avformat_find_stream_info(formatCtx, nil)
-        if infoResult < 0 {
-            print("FFmpeg## avformat_find_stream_info 실패: \(infoResult)")
-        } else {
-            print("FFmpeg## avformat_find_stream_info 성공")
-        }
+        guard let fmt else { return }
+        formatCtx = fmt
 
-        // 비디오 오디오 스트림 찾기
-        for i in 0 ..< Int(formatCtx.pointee.nb_streams) {
-            guard let stream = formatCtx.pointee.streams[i] else { continue }
-            let codecType = stream.pointee.codecpar.pointee.codec_type
+        avformat_find_stream_info(fmt, nil)
 
-            if codecType == AVMEDIA_TYPE_VIDEO && videoStreamIndex == -1 {
+        videoStreamIndex = -1
+        audioStreamIndex = -1
+
+        for i in 0..<Int(fmt.pointee.nb_streams) {
+            let st = fmt.pointee.streams[i]!
+            let type = st.pointee.codecpar.pointee.codec_type
+
+            if type == AVMEDIA_TYPE_VIDEO && videoStreamIndex == -1 {
                 videoStreamIndex = Int32(i)
-                print("FFmpeg## 비디오 스트림 발견 index: \(videoStreamIndex)")
             }
-
-            if codecType == AVMEDIA_TYPE_AUDIO && audioStreamIndex == -1 {
+            if type == AVMEDIA_TYPE_AUDIO && audioStreamIndex == -1 {
                 audioStreamIndex = Int32(i)
-                print("FFmpeg## 오디오 스트림 발견 index: \(audioStreamIndex)")
             }
         }
 
-        if videoStreamIndex == -1 {
-            print("FFmpeg## 비디오 스트림을 찾지 못함")
-            state = .error
-            return
-        }
-
-        // duration 계산
-        let duration = formatCtx.pointee.duration
-        let AV_TIME_BASE_Q = AVRational(num: 1, den: Int32(AV_TIME_BASE))
-        //let AV_TIME_BASE_Q = av_make_q(1, AV_TIME_BASE)
-
-        if duration > 0 {
-            durationMs = Int64(av_rescale_q(duration, AV_TIME_BASE_Q, AVRational(num: 1, den: 1000)))
-            print("FFmpeg## duration(ms): \(durationMs)")
-        } else {
-            print("FFmpeg## duration 정보 없음(duration <= 0)")
-        }
-
-        // 비디오 오디오 디코더 준비
         prepareVideoDecoder()
-        if audioStreamIndex != -1 {
-            prepareAudioDecoder()
+        if audioStreamIndex >= 0 { prepareAudioDecoder() }
+
+        state = .readyToPlay
+    }
+    
+    private func closeCurrentFile() {
+
+        if formatCtx != nil {
+            avformat_close_input(&formatCtx)
+            formatCtx = nil
         }
 
-        print("FFmpeg## 디코딩 준비 완료 → readyToPlay")
-        state = .readyToPlay
-        
-        decoding()
+        if videoCodecCtx != nil {
+            avcodec_free_context(&videoCodecCtx)
+            videoCodecCtx = nil
+        }
+
+        if audioCodecCtx != nil {
+            avcodec_free_context(&audioCodecCtx)
+            audioCodecCtx = nil
+        }
+
+        videoStreamIndex = -1
+        audioStreamIndex = -1
     }
     
     // MARK: - Check Codec
@@ -263,14 +257,19 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 if state != .paused {
                     player?.pause()
                     engine?.pause()
-                    _ = readPause()
                 }
                 pauseCondition.wait()
             }
             pauseCondition.unlock()
 
-            if state == .paused {
-                _ = readPlay()
+            // ---------- segment 대기 ----------
+            if formatCtx == nil {
+                if let next = nextSegment() {
+                    openFileInternal(url: next)
+                } else {
+                    usleep(50_000)
+                    continue
+                }
             }
         
             let readRet = readFrame(packet: pktPtr)
