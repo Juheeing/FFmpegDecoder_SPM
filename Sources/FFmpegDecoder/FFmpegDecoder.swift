@@ -104,7 +104,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     private func openFileInternal(url: String) {
 
-        print("Decoder## open segment:", url)
+        print("FFmpeg## open segment:", url)
 
         var fmt: UnsafeMutablePointer<AVFormatContext>?
         if avformat_open_input(&fmt, url, nil, nil) < 0 { return }
@@ -135,21 +135,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
         state = .readyToPlay
     }
     
-    private func closeCurrentFile() {
+    func closeCurrentFile() {
 
         if formatCtx != nil {
             avformat_close_input(&formatCtx)
             formatCtx = nil
-        }
-
-        if videoCodecCtx != nil {
-            avcodec_free_context(&videoCodecCtx)
-            videoCodecCtx = nil
-        }
-
-        if audioCodecCtx != nil {
-            avcodec_free_context(&audioCodecCtx)
-            audioCodecCtx = nil
         }
 
         videoStreamIndex = -1
@@ -326,20 +316,27 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
     func readFrame(packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
         guard let fmt = formatCtx else {
-            if state != .error { state = .error }
-            print("FFmpeg## readFrame: formatCtx is nil")
-            return -1
+            return EOF
         }
 
         let ret = av_read_frame(fmt, packet)
 
-        if ret < 0 {
+        if ret == EOF || ret < 0 {
+
+            print("FFmpeg## segment EOF")
+
             closeCurrentFile()
+
+            // flush decoder state
+            if let v = videoCodecCtx { avcodec_flush_buffers(v) }
+            if let a = audioCodecCtx { avcodec_flush_buffers(a) }
+
             return EOF
         }
 
         return ret
     }
+
 
     func sendPacket(ctx: UnsafeMutablePointer<AVCodecContext>?,
                     packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
