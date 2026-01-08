@@ -17,6 +17,8 @@ public final class StreamRecorder: @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "ffmpeg.recorder")
 
+    public init() {}
+    
     public func start(rtspUrl: String, outputPath: String) {
         print("Recorder## start called")
 
