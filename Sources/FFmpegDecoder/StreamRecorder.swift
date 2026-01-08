@@ -84,7 +84,7 @@ public final class StreamRecorder: @unchecked Sendable {
                     openNewSegment()
                 }
 
-                writePacket(pkt)
+                writePacket(&pkt)
                 av_packet_unref(&pkt)
             }
 
@@ -178,19 +178,17 @@ public final class StreamRecorder: @unchecked Sendable {
 
     // MARK: - Write
 
-    private func writePacket(_ pkt: AVPacket) {
+    private func writePacket(_ pkt: inout AVPacket) {
 
         guard let inCtx, let outCtx else { return }
 
         let inIndex = pkt.stream_index
         let outIndex = streamMap[Int(inIndex)]
-
         if outIndex < 0 { return }
 
         let inStream = inCtx.pointee.streams[Int(inIndex)]!
         let outStream = outCtx.pointee.streams[Int(outIndex)]!
 
-        var pkt = pkt
         pkt.stream_index = outIndex
 
         pkt.pts = av_rescale_q_rnd(pkt.pts,
