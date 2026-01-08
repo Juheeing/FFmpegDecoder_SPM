@@ -72,6 +72,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private var segmentQueue: [String] = []
     private let segmentLock = NSLock()
     
+    private var videoDstBuffer: UnsafeMutableRawPointer?
+    
     // 디코딩 스레드
     private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
     
@@ -267,7 +269,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 openFileInternal(url: next)
             } else {
                 usleep(50_000)
-                return  
+                return
             }
         }
 
@@ -433,8 +435,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 return
             }
 
-            let rawBuffer = av_malloc(Int(bufSize))
-            if rawBuffer == nil {
+            videoDstBuffer = av_malloc(Int(bufSize))
+            if videoDstBuffer == nil {
                 print("FFmpeg## av_malloc 실패")
                 return
             }
@@ -447,7 +449,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
             // av_image_fill_arrays expects UnsafeMutablePointer<UnsafeMutablePointer<UInt8>?>?
             dstData.withUnsafeMutableBufferPointer { ptr in
                 let px = ptr.baseAddress!
-                av_image_fill_arrays(px, &dstLineSize, rawBuffer!.assumingMemoryBound(to: UInt8.self), dstFormat, Int32(srcWidth), Int32(srcHeight), 1)
+                av_image_fill_arrays(px, &dstLineSize, videoDstBuffer!.assumingMemoryBound(to: UInt8.self), dstFormat, Int32(srcWidth), Int32(srcHeight), 1)
             }
         }
 
@@ -501,18 +503,16 @@ public final class FFmpegDecoder: @unchecked Sendable {
         let bytesPerRow = Int(dstLineSize[0])
         let dataSize = bytesPerRow * srcHeight
 
-        // UnsafeRawPointer로 Data 생성
-        let rawPointer = UnsafeRawPointer(dst0)
-        let imageData = Data(bytes: rawPointer, count: dataSize)
-
-        // CGImage 생성 (BGRA, little endian, premultiplied first)
-        guard let provider = CGDataProvider(data: imageData as CFData) else {
-            print("FFmpeg## CGDataProvider 생성 실패")
-            return
-        }
+        guard let provider = CGDataProvider(
+            dataInfo: nil,
+            data: dst0,
+            size: dataSize,
+            releaseData: { _, _, _ in }
+        ) else { return }
 
         let colorSpace = CGColorSpaceCreateDeviceRGB()
-        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue).union(.byteOrder32Little)
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue)
+            .union(.byteOrder32Little)
 
         guard let cgImage = CGImage(
             width: srcWidth,
@@ -526,14 +526,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
             decode: nil,
             shouldInterpolate: true,
             intent: .defaultIntent
-        ) else {
-            print("FFmpeg## CGImage 생성 실패")
-            return
-        }
+        ) else { return }
 
         let ciImage = CIImage(cgImage: cgImage)
 
-        DispatchQueue.main.sync {
+        DispatchQueue.main.async {
             self.delegate?.decoder(self, didReceiveDecodedImage: ciImage)
         }
     }
@@ -727,6 +724,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if pktPtr != nil {
             av_packet_free(&pktPtr)
             pktPtr = nil
+        }
+        
+        if let buf = videoDstBuffer {
+            av_free(buf)
+            videoDstBuffer = nil
         }
 
         player?.stop()
