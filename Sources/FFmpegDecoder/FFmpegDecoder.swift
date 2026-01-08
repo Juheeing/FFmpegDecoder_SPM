@@ -233,85 +233,93 @@ public final class FFmpegDecoder: @unchecked Sendable {
         pktPtr = av_packet_alloc()
         vFrame = av_frame_alloc()
         aFrame = av_frame_alloc()
-        
-        guard let pktPtr = pktPtr else {
+
+        guard pktPtr != nil else {
             print("FFmpeg## alloc fail")
             stopDecoding()
             return
         }
-        
+
         while !decodingStopped {
-                
-            pauseCondition.lock()
-            while isPaused {
-                if state != .paused {
-                    player?.pause()
-                    engine?.pause()
-                }
-                pauseCondition.wait()
+            autoreleasepool {
+                decodeStep()
             }
-            pauseCondition.unlock()
-
-            // ---------- segment 대기 ----------
-            if formatCtx == nil {
-                if let next = nextSegment() {
-                    openFileInternal(url: next)
-                } else {
-                    usleep(50_000)
-                    continue
-                }
-            }
-        
-            let readRet = readFrame(packet: pktPtr)
-            
-            if readRet == EOF {
-                av_packet_unref(pktPtr)
-                continue   // 다음 segment 열도록 위로 올라감
-            }
-
-            if readRet < 0 {
-                av_packet_unref(pktPtr)
-                usleep(30_000)
-                continue
-            }
-
-            let streamIndex = pktPtr.pointee.stream_index
-    
-            if streamIndex == videoStreamIndex {
-
-                let sendRet = sendPacket(ctx: videoCodecCtx, packet: pktPtr)
-
-                if sendRet >= 0 {
-                    while true {
-                        let recvRet = receiveFrame(ctx: videoCodecCtx, frame: vFrame)
-                        
-                        if recvRet < 0 { break }
-            
-                        getCurrentTime(frame: vFrame, stream: videoStream)
-                        drawImage()
-                    }
-                }
-            } else if streamIndex == audioStreamIndex {
-
-                let sendRet = sendPacket(ctx: audioCodecCtx, packet: pktPtr)
-
-                if sendRet >= 0 {
-                    while true {
-                        let recvRet = receiveFrame(ctx: audioCodecCtx, frame: aFrame)
-
-                        if recvRet < 0 { break }
-
-                        drawAudio()
-                    }
-                }
-            }
-
-            av_packet_unref(pktPtr)
-
         }
+
         clear()
     }
 
+    private func decodeStep() {
+
+        pauseCondition.lock()
+        while isPaused {
+            if state != .paused {
+                player?.pause()
+                engine?.pause()
+            }
+            pauseCondition.wait()
+        }
+        pauseCondition.unlock()
+
+        // ---------- segment 대기 ----------
+        if formatCtx == nil {
+            if let next = nextSegment() {
+                openFileInternal(url: next)
+            } else {
+                usleep(50_000)
+                return  
+            }
+        }
+
+        guard let pktPtr else { return }
+
+        let readRet = readFrame(packet: pktPtr)
+
+        if readRet == EOF {
+            av_packet_unref(pktPtr)
+            return
+        }
+
+        if readRet < 0 {
+            av_packet_unref(pktPtr)
+            usleep(30_000)
+            return
+        }
+
+        let streamIndex = pktPtr.pointee.stream_index
+
+        if streamIndex == videoStreamIndex {
+
+            let sendRet = sendPacket(ctx: videoCodecCtx, packet: pktPtr)
+
+            if sendRet >= 0 {
+                while true {
+                    let recvRet = receiveFrame(ctx: videoCodecCtx, frame: vFrame)
+                    if recvRet < 0 { break }
+
+                    getCurrentTime(frame: vFrame, stream: videoStream)
+                    drawImage()
+                }
+            }
+
+        } else if streamIndex == audioStreamIndex {
+
+            let sendRet = sendPacket(ctx: audioCodecCtx, packet: pktPtr)
+
+            if sendRet >= 0 {
+                while true {
+                    let recvRet = receiveFrame(ctx: audioCodecCtx, frame: aFrame)
+                    if recvRet < 0 { break }
+
+                    drawAudio()
+                }
+            }
+        }
+
+        av_packet_unref(pktPtr)
+    }
+
+    
     // MARK: - FFmpeg Functions
     
     func readFrame(packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
@@ -362,35 +370,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         }
 
         let ret = avcodec_receive_frame(ctx, frame)
-
-        return ret
-    }
-    
-    func readPlay() -> Int32 {
-        guard let fmt = formatCtx else { return -1 }
-
-        let ret = av_read_play(fmt)
-
-        if ret >= 0 {
-            if state != .readyToPlay { state = .readyToPlay }
-        } else {
-            if state != .error { state = .error }
-            print("FFmpeg## av_read_play error: \(ret)")
-        }
-        return ret
-    }
-
-    func readPause() -> Int32 {
-        guard let fmt = formatCtx else { return -1 }
-
-        let ret = av_read_pause(fmt)
-
-        if ret >= 0 {
-            if state != .paused { state = .paused }
-        } else {
-            if state != .error { state = .error }
-            print("FFmpeg## av_read_pause error: \(ret)")
-        }
 
         return ret
     }
