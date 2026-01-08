@@ -273,8 +273,15 @@ public final class FFmpegDecoder: @unchecked Sendable {
             }
         
             let readRet = readFrame(packet: pktPtr)
+            
+            if readRet == EOF {
+                av_packet_unref(pktPtr)
+                continue   // 다음 segment 열도록 위로 올라감
+            }
+
             if readRet < 0 {
                 av_packet_unref(pktPtr)
+                usleep(30_000)
                 continue
             }
 
@@ -327,14 +334,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
         let ret = av_read_frame(fmt, packet)
 
         if ret < 0 {
-            if ret == EOF {
-                print("FFmpeg## readFrame: EOF reached")
-                if state != .playedToTheEnd { state = .playedToTheEnd }
-                stopDecoding()
-            } else {
-                if state != .error { state = .error }
-                print("FFmpeg## readFrame error: \(ret)")
-            }
+            closeCurrentFile()
+            return EOF
         }
 
         return ret
