@@ -16,7 +16,7 @@ public enum FFmpegDecoderState: Int {
 
 public protocol FFmpegDecoderDelegate: AnyObject {
     func decoder(_ decoder: FFmpegDecoder, didChangeState state: FFmpegDecoderState)
-    func decoder(_ decoder: FFmpegDecoder, didUpdateCurrentTime seconds: Int64, duration: Int64)
+    func decoder(_ decoder: FFmpegDecoder, didUpdateCurrentTime seconds: Int64)
     func decoder(_ decoder: FFmpegDecoder, didReceiveVideoSize size: CGSize)
     func decoder(_ decoder: FFmpegDecoder, didReceiveSeeking isSeeking: Bool)
     func decoder(_ decoder: FFmpegDecoder, didReceiveDecodedImage image: CIImage)
@@ -318,6 +318,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if idx == videoStreamIndex {
             if avcodec_send_packet(videoCodecCtx, pkt) >= 0 {
                 while avcodec_receive_frame(videoCodecCtx, vFrame) >= 0 {
+                    getCurrentTime(frame: vFrame, stream: videoStream)
                     syncVideo(vFrame!)
                     drawImage()
                 }
@@ -445,7 +446,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         let seconds = Double(ms) / 1000.0
         
         DispatchQueue.main.sync {
-            self.delegate?.decoder(self, didUpdateCurrentTime: Int64(seconds), duration: self.durationMs / 1000)
+            self.delegate?.decoder(self, didUpdateCurrentTime: Int64(seconds))
         }
     }
 
