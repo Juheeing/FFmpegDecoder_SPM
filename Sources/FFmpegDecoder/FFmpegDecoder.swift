@@ -105,29 +105,25 @@ public final class FFmpegDecoder: @unchecked Sendable {
         av_dict_set(&opt, "fflags", "nobuffer", 0)
         av_dict_set(&opt, "flags", "low_delay", 0)
 
-        let fmt = avformat_alloc_context()!
+        formatCtx = avformat_alloc_context()!
 
-        fmt.pointee.interrupt_callback = AVIOInterruptCB(
+        formatCtx?.pointee.interrupt_callback = AVIOInterruptCB(
             callback: { opaque in
                 let decoder = Unmanaged<FFmpegDecoder>
                     .fromOpaque(opaque!)
                     .takeUnretainedValue()
-                return decoder.readStopped ? 1 : 0
+                return decoder.readStopped || decoder.decodingStopped ? 1 : 0
             },
             opaque: Unmanaged.passUnretained(self).toOpaque()
         )
 
-        var fmtOpt: UnsafeMutablePointer<AVFormatContext>? = fmt
-
-        if avformat_open_input(&fmtOpt, url, nil, &opt) < 0 {
+        if avformat_open_input(&formatCtx, url, nil, &opt) < 0 {
             state = .error
-            avformat_free_context(fmt)
+            avformat_free_context(formatCtx)
             return
         }
 
-        formatCtx = fmtOpt
-
-        avformat_find_stream_info(fmt, nil)
+        avformat_find_stream_info(formatCtx, nil)
 
         for i in 0..<Int(formatCtx!.pointee.nb_streams) {
             let st = formatCtx!.pointee.streams[i]!
@@ -261,8 +257,16 @@ public final class FFmpegDecoder: @unchecked Sendable {
             av_packet_free(&p)
             readPkt = nil
         }
+        
+        closeInput()
     }
-
+    
+    private func closeInput() {
+        if formatCtx != nil {
+            avformat_close_input(&formatCtx)
+            formatCtx = nil
+        }
+    }
     
     private func packetTimeMs(_ pkt: UnsafeMutablePointer<AVPacket>) -> Int64 {
         guard let stream = videoStream else { return 0 }
@@ -289,9 +293,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
             if state != .readyToPlay { state = .readyToPlay }
 
             guard let item = packetBuffer.pop() else {
-                        usleep(10_000)
-                        continue
-                    }
+                usleep(10_000)
+                continue
+            }
 
             guard let pkt = item.pkt else { return }
 
@@ -349,8 +353,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         return ret
     }
-
-
+    
     func sendPacket(ctx: UnsafeMutablePointer<AVCodecContext>?,
                     packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
 
@@ -684,16 +687,20 @@ public final class FFmpegDecoder: @unchecked Sendable {
             
         pauseCondition.signal()
         pauseCondition.unlock()
+        
         print("FFmpeg## Resume")
     }
 
     public func stopDecoding() {
         pauseCondition.lock()
+        
         readStopped = true
         decodingStopped = true
         packetBuffer.clear()
+        
         pauseCondition.signal()
         pauseCondition.unlock()
+        
         print("FFmpeg## stopDecoding requested")
     }
     
