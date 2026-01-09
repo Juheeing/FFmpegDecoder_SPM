@@ -105,11 +105,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
         av_dict_set(&opt, "fflags", "nobuffer", 0)
         av_dict_set(&opt, "flags", "low_delay", 0)
 
-        var fmt: UnsafeMutablePointer<AVFormatContext>?
+        let fmt = avformat_alloc_context()!
 
-        fmt = avformat_alloc_context()
-
-        fmt!.pointee.interrupt_callback = AVIOInterruptCB(
+        fmt.pointee.interrupt_callback = AVIOInterruptCB(
             callback: { opaque in
                 let decoder = Unmanaged<FFmpegDecoder>
                     .fromOpaque(opaque!)
@@ -118,17 +116,21 @@ public final class FFmpegDecoder: @unchecked Sendable {
             },
             opaque: Unmanaged.passUnretained(self).toOpaque()
         )
-        
-        if avformat_open_input(&fmt, url, nil, &opt) < 0 {
+
+        var fmtOpt: UnsafeMutablePointer<AVFormatContext>? = fmt
+
+        if avformat_open_input(&fmtOpt, url, nil, &opt) < 0 {
             state = .error
+            avformat_free_context(fmt)
             return
         }
 
-        formatCtx = fmt
+        formatCtx = fmtOpt
+
         avformat_find_stream_info(fmt, nil)
 
-        for i in 0..<Int(fmt!.pointee.nb_streams) {
-            let st = fmt!.pointee.streams[i]!
+        for i in 0..<Int(formatCtx!.pointee.nb_streams) {
+            let st = formatCtx!.pointee.streams[i]!
             if st.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_VIDEO {
                 videoStreamIndex = Int32(i)
                 videoStream = st
