@@ -107,6 +107,18 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         var fmt: UnsafeMutablePointer<AVFormatContext>?
 
+        fmt = avformat_alloc_context()
+
+        fmt!.pointee.interrupt_callback = AVIOInterruptCB(
+            callback: { opaque in
+                let decoder = Unmanaged<FFmpegDecoder>
+                    .fromOpaque(opaque!)
+                    .takeUnretainedValue()
+                return decoder.readStopped ? 1 : 0
+            },
+            opaque: Unmanaged.passUnretained(self).toOpaque()
+        )
+        
         if avformat_open_input(&fmt, url, nil, &opt) < 0 {
             state = .error
             return
