@@ -70,11 +70,12 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - Pause Condition
     private let pauseCondition = NSCondition()
 
-    // MARK: - Segment Buffer
-    private var segmentQueue: [String] = []
-    private let segmentLock = NSLock()
-    
+    // MARK: - Packet Buffer
     private let packetBuffer = PacketRingBuffer()
+    
+    // MARK: - Video Clock
+    private var firstVideoPtsMs: Int64?
+    private var playStartSystemTime: TimeInterval?
     
     // MARK: - Thrades
     private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
@@ -290,7 +291,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
             }
             pauseCondition.unlock()
             
-            if state != .readyToPlay { state = .readyToPlay }
+            if state != .bufferFinished { state = .bufferFinished }
 
             guard let item = packetBuffer.pop() else {
                 usleep(10_000)
@@ -299,7 +300,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
             guard let pkt = item.pkt else { return }
 
-            processPacket(pkt)
+            decodePacket(pkt)
 
             var p: UnsafeMutablePointer<AVPacket>? = pkt
             av_packet_free(&p)
@@ -308,13 +309,16 @@ public final class FFmpegDecoder: @unchecked Sendable {
         clear()
     }
     
-    private func processPacket(_ pkt: UnsafeMutablePointer<AVPacket>) {
+    // MARK: Decode Packet
+    
+    private func decodePacket(_ pkt: UnsafeMutablePointer<AVPacket>) {
 
         let idx = pkt.pointee.stream_index
 
         if idx == videoStreamIndex {
             if avcodec_send_packet(videoCodecCtx, pkt) >= 0 {
                 while avcodec_receive_frame(videoCodecCtx, vFrame) >= 0 {
+                    syncVideo(vFrame!)
                     drawImage()
                 }
             }
@@ -326,6 +330,40 @@ public final class FFmpegDecoder: @unchecked Sendable {
                     drawAudio()
                 }
             }
+        }
+    }
+    
+    // MARK: Video Sync
+
+    private func videoPtsMs(_ frame: UnsafeMutablePointer<AVFrame>) -> Int64? {
+        guard let stream = videoStream else { return nil }
+
+        let pts = frame.pointee.best_effort_timestamp
+        if pts == Int64.min { return nil }
+
+        return av_rescale_q(pts, stream.pointee.time_base,
+                            AVRational(num: 1, den: 1000))
+    }
+
+    private func syncVideo(_ frame: UnsafeMutablePointer<AVFrame>) {
+
+        guard let ptsMs = videoPtsMs(frame) else { return }
+
+        if firstVideoPtsMs == nil {
+            firstVideoPtsMs = ptsMs
+            playStartSystemTime = CACurrentMediaTime()
+            return
+        }
+
+        guard let startPts = firstVideoPtsMs,
+              let startTime = playStartSystemTime else { return }
+
+        let videoElapsed = Double(ptsMs - startPts) / 1000.0
+        let systemElapsed = CACurrentMediaTime() - startTime
+
+        let delay = videoElapsed - systemElapsed
+        if delay > 0 {
+            usleep(UInt32(delay * 1_000_000))
         }
     }
     
@@ -685,6 +723,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
         pauseCondition.lock()
         isPaused = false
             
+        firstVideoPtsMs = nil
+        playStartSystemTime = nil
+        
         pauseCondition.signal()
         pauseCondition.unlock()
         
