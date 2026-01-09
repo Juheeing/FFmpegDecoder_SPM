@@ -688,9 +688,12 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
 
     public func stopDecoding() {
+        pauseCondition.lock()
         readStopped = true
         decodingStopped = true
         packetBuffer.clear()
+        pauseCondition.signal()
+        pauseCondition.unlock()
         print("FFmpeg## stopDecoding requested")
     }
     
