@@ -76,7 +76,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - Video Clock
     private var firstVideoPtsMs: Int64?
     private var playStartSystemTime: TimeInterval?
-    private var waitingForKeyFrame = false
+    private var waitingForKeyFrame = true
     
     // MARK: - Thrades
     private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
@@ -237,7 +237,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
             guard let pkt = readPkt else { break }
 
-            let ret = av_read_frame(formatCtx, pkt)
+            let ret = readFrame(packet: pkt)
             if ret < 0 {
                 usleep(50_000)
                 continue
@@ -302,9 +302,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 usleep(10_000)
                 continue
             }
-
-            guard let pkt = item.pkt else { return }
-
             decodePacket(item)
         }
 
@@ -327,11 +324,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 waitingForKeyFrame = false
             }
             
-            let ret = avcodec_send_packet(videoCodecCtx, item.pkt)
+            let ret = sendPacket(ctx: videoCodecCtx, packet: item.pkt)
             av_packet_free(&item.pkt)
             
             if ret >= 0 {
-                while avcodec_receive_frame(videoCodecCtx, vFrame) >= 0 {
+                while receiveFrame(ctx: videoCodecCtx, frame: vFrame) >= 0 {
                     getCurrentTime(frame: vFrame, stream: videoStream)
                     syncVideo(itemPtsMs: item.ptsMs)
                     drawImage()
@@ -341,11 +338,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         if idx == audioStreamIndex {
             
-            let ret = avcodec_send_packet(audioCodecCtx, item.pkt)
+            let ret = sendPacket(ctx: audioCodecCtx, packet: item.pkt)
             av_packet_free(&item.pkt)
             
             if ret >= 0 {
-                while avcodec_receive_frame(audioCodecCtx, aFrame) >= 0 {
+                while receiveFrame(ctx: audioCodecCtx, frame: aFrame) >= 0 {
                     drawAudio()
                 }
             }
@@ -402,7 +399,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
     
     func sendPacket(ctx: UnsafeMutablePointer<AVCodecContext>?,
-                    packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
+                    packet: UnsafeMutablePointer<AVPacket>?) -> Int32 {
 
         guard let ctx else {
             if state != .error { state = .error }
