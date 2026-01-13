@@ -306,9 +306,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
             guard let pkt = item.pkt else { return }
 
             decodePacket(item)
-
-            var p: UnsafeMutablePointer<AVPacket>? = pkt
-            av_packet_free(&p)
         }
 
         clear()
@@ -321,6 +318,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         let idx = item.streamIndex
 
         if idx == videoStreamIndex {
+            
             if waitingForKeyFrame {
                 if !item.isKey {
                     av_packet_free(&item.pkt)
@@ -328,7 +326,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 }
                 waitingForKeyFrame = false
             }
-            if avcodec_send_packet(videoCodecCtx, item.pkt) >= 0 {
+            
+            let ret = avcodec_send_packet(videoCodecCtx, item.pkt)
+            av_packet_free(&item.pkt)
+            
+            if ret >= 0 {
                 while avcodec_receive_frame(videoCodecCtx, vFrame) >= 0 {
                     getCurrentTime(frame: vFrame, stream: videoStream)
                     syncVideo(itemPtsMs: item.ptsMs)
@@ -338,7 +340,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
         }
 
         if idx == audioStreamIndex {
-            if avcodec_send_packet(audioCodecCtx, item.pkt) >= 0 {
+            
+            let ret = avcodec_send_packet(audioCodecCtx, item.pkt)
+            av_packet_free(&item.pkt)
+            
+            if ret >= 0 {
                 while avcodec_receive_frame(audioCodecCtx, aFrame) >= 0 {
                     drawAudio()
                 }
