@@ -25,8 +25,10 @@ final class PacketRingBuffer {
     private var buffer: [Item] = []
     private let maxCount = 3600
     private let lock = NSLock()
+    private var readStart = false
     
     var isEmpty: Bool {
+        if !readStart { return false }
         lock.lock()
         let empty = buffer.isEmpty
         lock.unlock()
@@ -38,6 +40,8 @@ final class PacketRingBuffer {
         // 반드시 clone/ref 해서 소유권 분리
         guard let copy = av_packet_clone(pkt) else { return }
 
+        readStart = true
+        
         let item = Item(pkt: copy, ptsMs: ptsMs, isKey: isKey)
 
         lock.lock()
@@ -60,6 +64,7 @@ final class PacketRingBuffer {
     
     func clear() {
         lock.lock()
+        readStart = false
         for i in 0..<buffer.count {
             av_packet_free(&buffer[i].pkt)
             buffer[i].pkt = nil

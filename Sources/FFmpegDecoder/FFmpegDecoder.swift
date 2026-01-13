@@ -294,7 +294,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
             if state != .bufferFinished { state = .bufferFinished }
 
             guard let item = packetBuffer.pop() else {
-                if readStopped && packetBuffer.isEmpty {
+                print("FFmpeg## No packets to decode")
+                if packetBuffer.isEmpty {
                     if state != .playedToTheEnd { state = .playedToTheEnd }
                 }
                 usleep(10_000)
