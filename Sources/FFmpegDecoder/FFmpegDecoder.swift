@@ -398,11 +398,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if ret < 0 {
             if ret == EOF {
                 print("FFmpeg## readFrame: EOF reached")
-                stopDecoding()
             } else {
-                if state != .error { state = .error }
                 print("FFmpeg## readFrame error: \(ret)")
             }
+            readStopped = true
         }
 
         return ret
