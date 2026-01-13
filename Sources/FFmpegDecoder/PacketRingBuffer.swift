@@ -37,12 +37,9 @@ final class PacketRingBuffer {
     
     func push(_ pkt: UnsafeMutablePointer<AVPacket>, ptsMs: Int64, isKey: Bool) {
 
-        // 반드시 clone/ref 해서 소유권 분리
-        guard let copy = av_packet_clone(pkt) else { return }
-
         readStart = true
         
-        let item = Item(pkt: copy, ptsMs: ptsMs, isKey: isKey)
+        let item = Item(pkt: pkt, ptsMs: ptsMs, isKey: isKey)
 
         lock.lock()
         buffer.append(item)

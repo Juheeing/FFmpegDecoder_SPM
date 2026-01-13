@@ -76,6 +76,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - Video Clock
     private var firstVideoPtsMs: Int64?
     private var playStartSystemTime: TimeInterval?
+    private var waitingForKeyFrame = true
     
     // MARK: - Thrades
     private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
@@ -301,6 +302,12 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 usleep(10_000)
                 continue
             }
+            
+            if waitingForKeyFrame && !item.isKey {
+                av_packet_free(&item.pkt)
+                continue
+            }
+            waitingForKeyFrame = false
 
             guard let pkt = item.pkt else { return }
 
@@ -720,6 +727,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if !isPaused { return }
         
         pauseCondition.lock()
+        
+        waitingForKeyFrame = true
         isPaused = false
                     
         firstVideoPtsMs = nil
