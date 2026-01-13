@@ -73,12 +73,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
     // MARK: - Packet Buffer
     private let packetBuffer = PacketRingBuffer()
     
-    // MARK: - Video Clock (PTS based)
-    private var basePtsMs: Int64?
-    private var baseSystemTime: TimeInterval?
-    private var lastFramePtsMs: Int64 = 0
-    private var pausedPtsMs: Int64?
-    private var waitingForKeyFrame = false
+    // MARK: - Video Clock
+    private var firstVideoPtsMs: Int64?
+    private var playStartSystemTime: TimeInterval?
     
     // MARK: - Thrades
     private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
@@ -231,23 +228,26 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
     private func startReadLoop() {
 
+        guard let formatCtx else { return }
+
         var readPkt: UnsafeMutablePointer<AVPacket>? = av_packet_alloc()
 
         while !readStopped {
 
             guard let pkt = readPkt else { break }
 
-            let ret = readFrame(packet: pkt)
+            let ret = av_read_frame(formatCtx, pkt)
             if ret < 0 {
                 usleep(50_000)
                 continue
             }
 
-            let streamIdx = pkt.pointee.stream_index
-            let ptsMs = packetTimeMs(pkt, streamIndex: streamIdx)
+            let ptsMs = packetTimeMs(pkt)
             let isKey = (pkt.pointee.flags & AV_PKT_FLAG_KEY) != 0
 
-            packetBuffer.push(pkt, ptsMs: ptsMs, isKey: isKey, streamIndex: streamIdx)
+            if let clone = av_packet_clone(pkt) {
+                packetBuffer.push(clone, ptsMs: ptsMs, isKey: isKey)
+            }
 
             // read용 packet은 재사용
             av_packet_unref(pkt)
@@ -269,11 +269,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
         }
     }
     
-    private func packetTimeMs(_ pkt: UnsafeMutablePointer<AVPacket>, streamIndex: Int32) -> Int64 {
-        guard let fmt = formatCtx else { return 0 }
-        let stream = fmt.pointee.streams[Int(streamIndex)]
-        guard let st = stream else { return 0 }
-        return av_rescale_q(pkt.pointee.pts, st.pointee.time_base, AVRational(num: 1, den: 1000))
+    private func packetTimeMs(_ pkt: UnsafeMutablePointer<AVPacket>) -> Int64 {
+        guard let stream = videoStream else { return 0 }
+        return av_rescale_q(pkt.pointee.pts, stream.pointee.time_base,
+                            AVRational(num: 1, den: 1000))
     }
     
     // MARK: - Decoding Loop
@@ -302,7 +301,13 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 usleep(10_000)
                 continue
             }
-            decodePacket(item)
+
+            guard let pkt = item.pkt else { return }
+
+            decodePacket(pkt)
+
+            var p: UnsafeMutablePointer<AVPacket>? = pkt
+            av_packet_free(&p)
         }
 
         clear()
@@ -310,92 +315,63 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
     // MARK: Decode Packet
     
-    private func decodePacket(_ item: PacketRingBuffer.Item) {
+    private func decodePacket(_ pkt: UnsafeMutablePointer<AVPacket>) {
 
-        let idx = item.streamIndex
+        let idx = pkt.pointee.stream_index
 
         if idx == videoStreamIndex {
-            
-            if waitingForKeyFrame {
-                if !item.isKey {
-                    av_packet_free(&item.pkt)
-                    return
-                }
-                waitingForKeyFrame = false
-            }
-            
-            let ret = sendPacket(ctx: videoCodecCtx, packet: item.pkt)
-            av_packet_free(&item.pkt)
-            
-            if ret >= 0 {
-                while receiveFrame(ctx: videoCodecCtx, frame: vFrame) >= 0 {
-                    if let framePts = videoPtsMs(vFrame) {
-                        syncVideo(framePtsMs: framePts)
-                        lastFramePtsMs = framePts
-                    }
+            if avcodec_send_packet(videoCodecCtx, pkt) >= 0 {
+                while avcodec_receive_frame(videoCodecCtx, vFrame) >= 0 {
                     getCurrentTime(frame: vFrame, stream: videoStream)
+                    syncVideo(vFrame!)
                     drawImage()
                 }
             }
         }
 
         if idx == audioStreamIndex {
-            
-            let ret = sendPacket(ctx: audioCodecCtx, packet: item.pkt)
-            av_packet_free(&item.pkt)
-            
-            if ret >= 0 {
-                while receiveFrame(ctx: audioCodecCtx, frame: aFrame) >= 0 {
+            if avcodec_send_packet(audioCodecCtx, pkt) >= 0 {
+                while avcodec_receive_frame(audioCodecCtx, aFrame) >= 0 {
                     drawAudio()
                 }
             }
         }
     }
     
-    // MARK: - Video PTS
-
-    private func videoPtsMs(_ frame: UnsafeMutablePointer<AVFrame>?) -> Int64? {
-        guard let frame, let stream = videoStream else { return nil }
-        let pts = frame.pointee.best_effort_timestamp
-        if pts == Int64.min { return nil }
-        return av_rescale_q(pts, stream.pointee.time_base, AVRational(num: 1, den: 1000))
-    }
-    
-    
     // MARK: Video Sync
 
-    private func syncVideo(framePtsMs ptsMs: Int64) {
+    private func videoPtsMs(_ frame: UnsafeMutablePointer<AVFrame>) -> Int64? {
+        guard let stream = videoStream else { return nil }
 
-        if ptsMs == Int64.min { return }
+        let pts = frame.pointee.best_effort_timestamp
+        if pts == Int64.min { return nil }
 
-        if baseSystemTime == 0 {
-            basePtsMs = ptsMs
-            baseSystemTime = CACurrentMediaTime()
-            lastFramePtsMs = ptsMs
+        return av_rescale_q(pts, stream.pointee.time_base,
+                            AVRational(num: 1, den: 1000))
+    }
+
+    private func syncVideo(_ frame: UnsafeMutablePointer<AVFrame>) {
+
+        guard let ptsMs = videoPtsMs(frame) else { return }
+
+        if firstVideoPtsMs == nil {
+            firstVideoPtsMs = ptsMs
+            playStartSystemTime = CACurrentMediaTime()
             return
         }
-        
-        guard let basePtsMs, let baseSystemTime else { return }
 
-        let videoElapsed =
-            (Double(ptsMs) - Double(basePtsMs)) / 1000.0
+        guard let startPts = firstVideoPtsMs,
+              let startTime = playStartSystemTime else { return }
 
-        let realElapsed =
-            CACurrentMediaTime() - baseSystemTime
+        let videoElapsed = Double(ptsMs - startPts) / 1000.0
+        let systemElapsed = CACurrentMediaTime() - startTime
 
-        var delay = videoElapsed - realElapsed
-
-        // 너무 큰 delay는 네트워크 지연 → cap
-        if delay > 0.5 { delay = 0.5 }
-        if delay < -0.5 { delay = -0.5 }
-
+        let delay = videoElapsed - systemElapsed
         if delay > 0 {
             usleep(UInt32(delay * 1_000_000))
         }
-
-        lastFramePtsMs = ptsMs
     }
-
+    
     // MARK: - FFmpeg Functions
     
     func readFrame(packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
@@ -410,17 +386,18 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if ret < 0 {
             if ret == EOF {
                 print("FFmpeg## readFrame: EOF reached")
+                stopDecoding()
             } else {
+                if state != .error { state = .error }
                 print("FFmpeg## readFrame error: \(ret)")
             }
-            readStopped = true
         }
 
         return ret
     }
     
     func sendPacket(ctx: UnsafeMutablePointer<AVCodecContext>?,
-                    packet: UnsafeMutablePointer<AVPacket>?) -> Int32 {
+                    packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
 
         guard let ctx else {
             if state != .error { state = .error }
@@ -736,8 +713,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if isPaused { return }
         
         pauseCondition.lock()
-        
-        pausedPtsMs = lastFramePtsMs
         isPaused = true
 
         pauseCondition.signal()
@@ -750,17 +725,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if !isPaused { return }
         
         pauseCondition.lock()
-        
-        waitingForKeyFrame = true
         isPaused = false
                     
-        if let pts = pausedPtsMs {
-            basePtsMs = pts
-            baseSystemTime = CACurrentMediaTime()
-        } else {
-            basePtsMs = nil
-            baseSystemTime = nil
-        }
+        firstVideoPtsMs = nil
+        playStartSystemTime = nil
         
         pauseCondition.signal()
         pauseCondition.unlock()
