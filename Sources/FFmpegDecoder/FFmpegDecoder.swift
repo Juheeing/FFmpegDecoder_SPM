@@ -723,9 +723,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         pauseCondition.lock()
         isPaused = false
-            
-        packetBuffer.clear()
-        
+                    
         firstVideoPtsMs = nil
         playStartSystemTime = nil
         
