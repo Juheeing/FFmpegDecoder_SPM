@@ -103,8 +103,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         var opt: OpaquePointer?
         av_dict_set(&opt, "rtsp_transport", "tcp", 0)
-        av_dict_set(&opt, "fflags", "nobuffer", 0)
-        av_dict_set(&opt, "flags", "low_delay", 0)
+        /*av_dict_set(&opt, "fflags", "nobuffer", 0)
+        av_dict_set(&opt, "flags", "low_delay", 0)*/
 
         formatCtx = avformat_alloc_context()!
 
@@ -724,6 +724,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
         pauseCondition.lock()
         isPaused = false
             
+        packetBuffer.clear()
+        
         firstVideoPtsMs = nil
         playStartSystemTime = nil
         

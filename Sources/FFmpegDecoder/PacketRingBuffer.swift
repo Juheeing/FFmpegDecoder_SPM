@@ -50,26 +50,6 @@ final class PacketRingBuffer {
         lock.unlock()
         return item
     }
-
-    func dropUntilLatestKeyframe() {
-        lock.lock()
-        var lastKeyIndex: Int?
-
-        for i in stride(from: buffer.count - 1, through: 0, by: -1) {
-            if buffer[i].isKey {
-                lastKeyIndex = i
-                break
-            }
-        }
-
-        if let idx = lastKeyIndex, idx > 0 {
-            for i in 0..<idx {
-                av_packet_free(&buffer[i].pkt)
-            }
-            buffer.removeFirst(idx)
-        }
-        lock.unlock()
-    }
     
     func clear() {
         lock.lock()
