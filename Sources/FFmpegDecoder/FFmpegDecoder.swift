@@ -366,24 +366,36 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     private func syncVideo(framePtsMs ptsMs: Int64) {
 
-        if basePtsMs == nil {
+        if ptsMs == Int64.min { return }
+
+        if baseSystemTime == 0 {
             basePtsMs = ptsMs
             baseSystemTime = CACurrentMediaTime()
+            lastFramePtsMs = ptsMs
             return
         }
-
+        
         guard let basePtsMs, let baseSystemTime else { return }
 
-        let videoElapsed = Double(ptsMs - basePtsMs) / 1000.0
-        let systemElapsed = CACurrentMediaTime() - baseSystemTime
+        let videoElapsed =
+            (Double(ptsMs) - Double(basePtsMs)) / 1000.0
 
-        let delay = videoElapsed - systemElapsed
-        if delay > 0.01 {
-            let clamped = min(delay, 0.2)
-            usleep(UInt32(clamped * 1_000_000))
+        let realElapsed =
+            CACurrentMediaTime() - baseSystemTime
+
+        var delay = videoElapsed - realElapsed
+
+        // 너무 큰 delay는 네트워크 지연 → cap
+        if delay > 0.5 { delay = 0.5 }
+        if delay < -0.5 { delay = -0.5 }
+
+        if delay > 0 {
+            usleep(UInt32(delay * 1_000_000))
         }
+
+        lastFramePtsMs = ptsMs
     }
-    
+
     // MARK: - FFmpeg Functions
     
     func readFrame(packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
