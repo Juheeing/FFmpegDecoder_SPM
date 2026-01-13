@@ -14,11 +14,13 @@ final class PacketRingBuffer {
         var pkt: UnsafeMutablePointer<AVPacket>?
         let ptsMs: Int64
         let isKey: Bool
+        let streamIndex: Int32
         
-        init(pkt: UnsafeMutablePointer<AVPacket>, ptsMs: Int64, isKey: Bool) {
+        init(pkt: UnsafeMutablePointer<AVPacket>, ptsMs: Int64, isKey: Bool, streamIndex: Int32) {
             self.pkt = pkt
             self.ptsMs = ptsMs
             self.isKey = isKey
+            self.streamIndex = streamIndex
         }
     }
 
@@ -28,21 +30,19 @@ final class PacketRingBuffer {
     private var readStart = false
     
     var isEmpty: Bool {
-        if !readStart { return false }
         lock.lock()
-        let empty = buffer.isEmpty
-        lock.unlock()
-        return empty
+        defer { lock.unlock() }
+        return readStart && buffer.isEmpty
     }
     
-    func push(_ pkt: UnsafeMutablePointer<AVPacket>, ptsMs: Int64, isKey: Bool) {
+    func push(_ pkt: UnsafeMutablePointer<AVPacket>, ptsMs: Int64, isKey: Bool, streamIndex: Int32) {
 
         // 반드시 clone/ref 해서 소유권 분리
         guard let copy = av_packet_clone(pkt) else { return }
 
         readStart = true
         
-        let item = Item(pkt: copy, ptsMs: ptsMs, isKey: isKey)
+        let item = Item(pkt: copy, ptsMs: ptsMs, isKey: isKey, streamIndex: streamIndex)
 
         lock.lock()
         buffer.append(item)
