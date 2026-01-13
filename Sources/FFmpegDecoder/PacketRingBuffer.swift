@@ -26,6 +26,13 @@ final class PacketRingBuffer {
     private let maxCount = 3600
     private let lock = NSLock()
     
+    var isEmpty: Bool {
+        lock.lock()
+        let empty = buffer.isEmpty
+        lock.unlock()
+        return empty
+    }
+    
     func push(_ pkt: UnsafeMutablePointer<AVPacket>, ptsMs: Int64, isKey: Bool) {
 
         // 반드시 clone/ref 해서 소유권 분리

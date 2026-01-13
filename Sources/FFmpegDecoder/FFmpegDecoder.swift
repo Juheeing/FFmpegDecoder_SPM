@@ -294,6 +294,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
             if state != .bufferFinished { state = .bufferFinished }
 
             guard let item = packetBuffer.pop() else {
+                if readStopped && packetBuffer.isEmpty {
+                    if state != .playedToTheEnd { state = .playedToTheEnd }
+                }
                 usleep(10_000)
                 continue
             }
@@ -382,7 +385,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if ret < 0 {
             if ret == EOF {
                 print("FFmpeg## readFrame: EOF reached")
-                if state != .playedToTheEnd { state = .playedToTheEnd }
                 stopDecoding()
             } else {
                 if state != .error { state = .error }
