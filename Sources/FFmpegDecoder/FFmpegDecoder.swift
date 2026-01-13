@@ -352,7 +352,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     private func syncVideo(_ frame: UnsafeMutablePointer<AVFrame>) {
 
-        guard let ptsMs = videoPtsMs(frame) else { return }
+        guard let ptsMs = videoPtsMs(frame), ptsMs >= 0 else { return }
 
         if firstVideoPtsMs == nil {
             firstVideoPtsMs = ptsMs
