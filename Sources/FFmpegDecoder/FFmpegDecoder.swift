@@ -365,8 +365,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
 
         let delay = videoElapsed - systemElapsed
-        if delay > 0 {
-            usleep(UInt32(delay * 1_000_000))
+        if delay > 0.01 {
+            let sleepUs = min(delay, 0.5) * 1_000_000
+            usleep(UInt32(sleepUs))
         }
     }
     
