@@ -270,7 +270,15 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
     private func packetTimeMs(_ pkt: UnsafeMutablePointer<AVPacket>) -> Int64 {
         guard let stream = videoStream else { return 0 }
-        return av_rescale_q(pkt.pointee.pts, stream.pointee.time_base,
+        
+        let AV_NOPTS_VALUE = Int64.min
+        
+        // PTS가 정의되지 않은 경우 DTS를 대신 사용하거나 0으로 처리
+        let pts = pkt.pointee.pts == AV_NOPTS_VALUE ? pkt.pointee.dts : pkt.pointee.pts
+        
+        if pts == AV_NOPTS_VALUE { return 0 } // 둘 다 없으면 0
+        
+        return av_rescale_q(pts, stream.pointee.time_base,
                             AVRational(num: 1, den: 1000))
     }
     
