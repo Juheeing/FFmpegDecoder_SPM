@@ -335,11 +335,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if idx == videoStreamIndex {
             if sendPacket(ctx: videoCodecCtx, packet: pkt) >= 0 {
                 while receiveFrame(ctx: videoCodecCtx, frame: vFrame) >= 0 {
+                    drawImage(ptsMs: ptsMs)
                     syncVideo(targetPtsMs: ptsMs)
                     DispatchQueue.main.async {
                         self.delegate?.decoder(self, didUpdateCurrentTime: ptsMs / 1000)
                     }
-                    drawImage(ptsMs: ptsMs)
                 }
             }
         }
@@ -367,29 +367,19 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     private func syncVideo(targetPtsMs: Int64) {
 
-        guard let startPts = firstVideoPtsMs,
-              let startTime = playStartSystemTime else { return }
+        guard let startPts = firstVideoPtsMs, let startTime = playStartSystemTime else { return }
 
-        // 재생되어야 할 상대 시간 (영상 기준)
         let videoElapsed = Double(targetPtsMs - startPts) / 1000.0
-        // 실제 흐른 시간 (시스템 기준)
         let systemElapsed = CACurrentMediaTime() - startTime
-
-        // 두 시간의 차이만큼 대기
         let delay = videoElapsed - systemElapsed
-        
-        if delay <= 0 {
-            if delay < -0.5 {
-                firstVideoPtsMs = targetPtsMs
-                playStartSystemTime = CACurrentMediaTime()
-            }
-            return
-        }
-        let maxDelay = 1.0
-        let safeDelay = min(delay, maxDelay)
 
-        let microseconds = UInt32(safeDelay * 1_000_000)
-        usleep(microseconds)
+        if delay > 0 {
+            let safeDelay = min(delay, 0.1)
+            usleep(UInt32(safeDelay * 1_000_000))
+        } else if delay < -0.1 {
+            self.firstVideoPtsMs = targetPtsMs
+            self.playStartSystemTime = CACurrentMediaTime()
+        }
     }
     
     // MARK: - FFmpeg Functions
@@ -562,15 +552,15 @@ public final class FFmpegDecoder: @unchecked Sendable {
             intent: .defaultIntent
         ) else { return }
 
+        if self.firstVideoPtsMs == nil {
+            self.firstVideoPtsMs = ptsMs
+            self.playStartSystemTime = CACurrentMediaTime()
+        }
+        
         let ciImage = CIImage(cgImage: cgImage)
 
         DispatchQueue.main.async {
             self.delegate?.decoder(self, didReceiveDecodedImage: ciImage)
-            
-            if self.firstVideoPtsMs == nil {
-                self.firstVideoPtsMs = ptsMs
-                self.playStartSystemTime = CACurrentMediaTime()
-            }
         }
     }
 
