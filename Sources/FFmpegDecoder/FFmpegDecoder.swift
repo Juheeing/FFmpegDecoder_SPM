@@ -227,8 +227,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
     private func startReadLoop() {
 
-        guard let formatCtx else { return }
-
         var readPkt: UnsafeMutablePointer<AVPacket>? = av_packet_alloc()
 
         while !readStopped {
@@ -366,16 +364,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
     // MARK: Video Sync
 
-    private func videoPtsMs(_ frame: UnsafeMutablePointer<AVFrame>) -> Int64? {
-        guard let stream = videoStream else { return nil }
-
-        let pts = frame.pointee.best_effort_timestamp
-        if pts == Int64.min { return nil }
-
-        return av_rescale_q(pts, stream.pointee.time_base,
-                            AVRational(num: 1, den: 1000))
-    }
-
     private func syncVideo(targetPtsMs: Int64) {
         // 1. 첫 프레임 기준점 설정
         if firstVideoPtsMs == nil {
@@ -395,18 +383,16 @@ public final class FFmpegDecoder: @unchecked Sendable {
         // 4. 두 시간의 차이만큼 대기
         let delay = videoElapsed - systemElapsed
         
-        if delay <= 0 {
-            if delay < -0.5 {
-                firstVideoPtsMs = targetPtsMs
-                playStartSystemTime = CACurrentMediaTime()
-            }
+        if abs(delay) > 0.5 {
+            print("FFmpeg## 시간 오차 감지(\(delay)s). 시계 재설정.")
+            self.firstVideoPtsMs = targetPtsMs
+            self.playStartSystemTime = CACurrentMediaTime()
             return
         }
-        let maxDelay = 1.0
-        let safeDelay = min(delay, maxDelay)
 
-        let microseconds = UInt32(safeDelay * 1_000_000)
-        usleep(microseconds)
+        if delay > 0 {
+            usleep(UInt32(min(delay, 0.1) * 1_000_000))
+        }
     }
     
     // MARK: - FFmpeg Functions
