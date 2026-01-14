@@ -290,7 +290,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
             }
             pauseCondition.unlock()
             
-            if isStarting && packetBuffer.bufferedDurationMs < 500 {
+            if isStarting && packetBuffer.bufferedDurationMs < 1500 {
                 usleep(10_000)
                 continue
             }
@@ -335,8 +335,12 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if idx == videoStreamIndex {
             if sendPacket(ctx: videoCodecCtx, packet: pkt) >= 0 {
                 while receiveFrame(ctx: videoCodecCtx, frame: vFrame) >= 0 {
-                    drawImage(ptsMs: ptsMs)
-                    syncVideo(targetPtsMs: ptsMs)
+                    
+                    let framePts = videoPtsMs(vFrame!) ?? ptsMs
+                    
+                    syncVideo(targetPtsMs: framePts)
+                    drawImage(ptsMs: framePts)
+                    
                     DispatchQueue.main.async {
                         self.delegate?.decoder(self, didUpdateCurrentTime: ptsMs / 1000)
                     }
@@ -367,6 +371,12 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     private func syncVideo(targetPtsMs: Int64) {
 
+        if firstVideoPtsMs == nil {
+            firstVideoPtsMs = targetPtsMs
+            playStartSystemTime = CACurrentMediaTime()
+            return // 첫 프레임은 대기 없이 즉시 통과
+        }
+        
         guard let startPts = firstVideoPtsMs, let startTime = playStartSystemTime else { return }
 
         let videoElapsed = Double(targetPtsMs - startPts) / 1000.0
@@ -376,9 +386,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if delay > 0 {
             let safeDelay = min(delay, 0.1)
             usleep(UInt32(safeDelay * 1_000_000))
-        } else if delay < -0.1 {
-            self.firstVideoPtsMs = targetPtsMs
-            self.playStartSystemTime = CACurrentMediaTime()
+        } else if delay < -0.03 {
+            self.playStartSystemTime! -= 0.01
         }
     }
     
