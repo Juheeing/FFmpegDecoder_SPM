@@ -237,7 +237,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
             let ret = readFrame(packet: pkt)
             if ret < 0 {
-                usleep(10_000)
+                usleep(50_000)
                 continue
             }
 
@@ -280,6 +280,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
         vFrame = av_frame_alloc()
         aFrame = av_frame_alloc()
+        
+        firstVideoPtsMs = nil
+        playStartSystemTime = nil
 
         while !decodingStopped {
 
@@ -290,7 +293,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
             }
             pauseCondition.unlock()
             
-            if isStarting && packetBuffer.bufferedDurationMs < 1500 {
+            if isStarting && packetBuffer.bufferedDurationMs < 500 {
                 usleep(10_000)
                 continue
             }
@@ -335,15 +338,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if idx == videoStreamIndex {
             if sendPacket(ctx: videoCodecCtx, packet: pkt) >= 0 {
                 while receiveFrame(ctx: videoCodecCtx, frame: vFrame) >= 0 {
-                    
-                    let framePts = videoPtsMs(vFrame!) ?? ptsMs
-                    
-                    syncVideo(targetPtsMs: framePts)
-                    drawImage(ptsMs: framePts)
-                    
-                    DispatchQueue.main.async {
+                    syncVideo(targetPtsMs: ptsMs)
+                    DispatchQueue.main.sync {
                         self.delegate?.decoder(self, didUpdateCurrentTime: ptsMs / 1000)
                     }
+                    drawImage()
                 }
             }
         }
@@ -370,25 +369,36 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
 
     private func syncVideo(targetPtsMs: Int64) {
-
+        // 1. 첫 프레임 기준점 설정
         if firstVideoPtsMs == nil {
             firstVideoPtsMs = targetPtsMs
             playStartSystemTime = CACurrentMediaTime()
-            return // 첫 프레임은 대기 없이 즉시 통과
+            return
         }
-        
-        guard let startPts = firstVideoPtsMs, let startTime = playStartSystemTime else { return }
 
+        guard let startPts = firstVideoPtsMs,
+              let startTime = playStartSystemTime else { return }
+
+        // 2. 재생되어야 할 상대 시간 (영상 기준)
         let videoElapsed = Double(targetPtsMs - startPts) / 1000.0
+        // 3. 실제 흐른 시간 (시스템 기준)
         let systemElapsed = CACurrentMediaTime() - startTime
-        let delay = videoElapsed - systemElapsed
 
-        if delay > 0 {
-            let safeDelay = min(delay, 0.1)
-            usleep(UInt32(safeDelay * 1_000_000))
-        } else if delay < -0.03 {
-            self.playStartSystemTime! -= 0.01
+        // 4. 두 시간의 차이만큼 대기
+        let delay = videoElapsed - systemElapsed
+        
+        if delay <= 0 {
+            if delay < -0.5 {
+                firstVideoPtsMs = targetPtsMs
+                playStartSystemTime = CACurrentMediaTime()
+            }
+            return
         }
+        let maxDelay = 1.0
+        let safeDelay = min(delay, maxDelay)
+
+        let microseconds = UInt32(safeDelay * 1_000_000)
+        usleep(microseconds)
     }
     
     // MARK: - FFmpeg Functions
@@ -440,7 +450,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
     // MARK: - Draw Image
     
-    private func drawImage(ptsMs: Int64) {
+    private func drawImage() {
         guard let vFrame = vFrame else { return }
 
         let srcWidth = Int(vFrame.pointee.width)
@@ -561,11 +571,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
             intent: .defaultIntent
         ) else { return }
 
-        if self.firstVideoPtsMs == nil {
-            self.firstVideoPtsMs = ptsMs
-            self.playStartSystemTime = CACurrentMediaTime()
-        }
-        
         let ciImage = CIImage(cgImage: cgImage)
 
         DispatchQueue.main.async {
