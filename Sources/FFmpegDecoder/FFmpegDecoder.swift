@@ -303,15 +303,15 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 continue
             }
             
-            if waitingForKeyFrame && !item.isKey {
+            /*if waitingForKeyFrame && !item.isKey {
                 av_packet_free(&item.pkt)
                 continue
             }
-            waitingForKeyFrame = false
+            waitingForKeyFrame = false*/
 
             guard let pkt = item.pkt else { return }
 
-            decodePacket(pkt)
+            decodePacket(pkt, ptsMs: item.ptsMs)
 
             var p: UnsafeMutablePointer<AVPacket>? = pkt
             av_packet_free(&p)
@@ -322,7 +322,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
     // MARK: Decode Packet
     
-    private func decodePacket(_ pkt: UnsafeMutablePointer<AVPacket>) {
+    private func decodePacket(_ pkt: UnsafeMutablePointer<AVPacket>, ptsMs: Int64) {
 
         let idx = pkt.pointee.stream_index
 
@@ -330,7 +330,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
             if sendPacket(ctx: videoCodecCtx, packet: pkt) >= 0 {
                 while receiveFrame(ctx: videoCodecCtx, frame: vFrame) >= 0 {
                     getCurrentTime(frame: vFrame, stream: videoStream)
-                    syncVideo(vFrame!)
+                    syncVideo(targetPtsMs: ptsMs)
                     drawImage()
                 }
             }
@@ -357,12 +357,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
                             AVRational(num: 1, den: 1000))
     }
 
-    private func syncVideo(_ frame: UnsafeMutablePointer<AVFrame>) {
-
-        guard let ptsMs = videoPtsMs(frame), ptsMs >= 0 else { return }
-
+    private func syncVideo(targetPtsMs: Int64) {
+        // 1. 첫 프레임 기준점 설정
         if firstVideoPtsMs == nil {
-            firstVideoPtsMs = ptsMs
+            firstVideoPtsMs = targetPtsMs
             playStartSystemTime = CACurrentMediaTime()
             return
         }
@@ -370,10 +368,14 @@ public final class FFmpegDecoder: @unchecked Sendable {
         guard let startPts = firstVideoPtsMs,
               let startTime = playStartSystemTime else { return }
 
-        let videoElapsed = Double(ptsMs - startPts) / 1000.0
+        // 2. 재생되어야 할 상대 시간 (영상 기준)
+        let videoElapsed = Double(targetPtsMs - startPts) / 1000.0
+        // 3. 실제 흐른 시간 (시스템 기준)
         let systemElapsed = CACurrentMediaTime() - startTime
 
+        // 4. 두 시간의 차이만큼 대기
         let delay = videoElapsed - systemElapsed
+        
         if delay > 0 {
             usleep(UInt32(delay * 1_000_000))
         }
