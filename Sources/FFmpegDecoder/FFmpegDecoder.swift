@@ -376,9 +376,18 @@ public final class FFmpegDecoder: @unchecked Sendable {
         // 4. 두 시간의 차이만큼 대기
         let delay = videoElapsed - systemElapsed
         
-        if delay > 0 {
-            usleep(UInt32(delay * 1_000_000))
+        if delay <= 0 {
+            if delay < -0.5 {
+                firstVideoPtsMs = targetPtsMs
+                playStartSystemTime = CACurrentMediaTime()
+            }
+            return
         }
+        let maxDelay = 1.0
+        let safeDelay = min(delay, maxDelay)
+
+        let microseconds = UInt32(safeDelay * 1_000_000)
+        usleep(microseconds)
     }
     
     // MARK: - FFmpeg Functions
