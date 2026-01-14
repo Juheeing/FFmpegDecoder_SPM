@@ -237,7 +237,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
             let ret = readFrame(packet: pkt)
             if ret < 0 {
-                usleep(50_000)
+                usleep(10_000)
                 continue
             }
 
@@ -336,7 +336,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
             if sendPacket(ctx: videoCodecCtx, packet: pkt) >= 0 {
                 while receiveFrame(ctx: videoCodecCtx, frame: vFrame) >= 0 {
                     syncVideo(targetPtsMs: ptsMs)
-                    DispatchQueue.main.sync {
+                    DispatchQueue.main.async {
                         self.delegate?.decoder(self, didUpdateCurrentTime: ptsMs / 1000)
                     }
                     drawImage(ptsMs: ptsMs)
