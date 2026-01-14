@@ -33,9 +33,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
     public private(set) var isSeeking = false {
         didSet { delegate?.decoder(self, didReceiveSeeking: isSeeking) }
     }
-    public private(set) var durationMs: Int64 = 0
-    public private(set) var currentTimeMs: Int64 = 0
-
     // MARK: - FFmpeg C contexts (UnsafeMutablePointer)
     private var formatCtx: UnsafeMutablePointer<AVFormatContext>?
     private var videoCodecCtx: UnsafeMutablePointer<AVCodecContext>?
@@ -77,6 +74,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private var firstVideoPtsMs: Int64?
     private var playStartSystemTime: TimeInterval?
     private var waitingForKeyFrame = true
+    private var isStarting = true
     
     // MARK: - Thrades
     private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
@@ -292,10 +290,18 @@ public final class FFmpegDecoder: @unchecked Sendable {
             }
             pauseCondition.unlock()
             
+            if isStarting && packetBuffer.bufferedDurationMs < 500 {
+                usleep(10_000)
+                continue
+            }
+            
+            if isStarting { isStarting = false }
+            
             if state != .bufferFinished { state = .bufferFinished }
 
             guard let item = packetBuffer.pop() else {
                 print("FFmpeg## No packets to decode")
+                isStarting = true
                 if packetBuffer.isEmpty {
                     if state != .playedToTheEnd { state = .playedToTheEnd }
                 }
@@ -329,8 +335,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
         if idx == videoStreamIndex {
             if sendPacket(ctx: videoCodecCtx, packet: pkt) >= 0 {
                 while receiveFrame(ctx: videoCodecCtx, frame: vFrame) >= 0 {
-                    getCurrentTime(frame: vFrame, stream: videoStream)
                     syncVideo(targetPtsMs: ptsMs)
+                    DispatchQueue.main.sync {
+                        self.delegate?.decoder(self, didUpdateCurrentTime: ptsMs / 1000)
+                    }
                     drawImage()
                 }
             }
@@ -435,35 +443,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         let ret = avcodec_receive_frame(ctx, frame)
 
         return ret
-    }
-    
-    // MARK: - Get Current Time
-    
-    private func getCurrentTime(frame: UnsafeMutablePointer<AVFrame>?,
-                        stream: UnsafeMutablePointer<AVStream>?) {
-
-        guard let frame = frame else { return }
-
-        let streamRef = stream ?? videoStream
-        guard let stream = streamRef else { return }
-        
-        let AV_NOPTS_VALUE: Int64 = Int64.min
-        var pts = frame.pointee.best_effort_timestamp
-        
-        if pts == AV_NOPTS_VALUE {
-            pts = frame.pointee.pts
-            
-            if pts == AV_NOPTS_VALUE {
-                return
-            }
-        }
-        
-        let ms = av_rescale_q(pts, stream.pointee.time_base, AVRational(num: 1, den: 1000))
-        let seconds = Double(ms) / 1000.0
-        
-        DispatchQueue.main.sync {
-            self.delegate?.decoder(self, didUpdateCurrentTime: Int64(seconds))
-        }
     }
 
     // MARK: - Draw Image
@@ -744,6 +723,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
                     
         firstVideoPtsMs = nil
         playStartSystemTime = nil
+        isStarting = true
         
         pauseCondition.signal()
         pauseCondition.unlock()

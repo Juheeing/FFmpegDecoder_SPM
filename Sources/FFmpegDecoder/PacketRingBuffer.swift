@@ -35,6 +35,12 @@ final class PacketRingBuffer {
         return empty
     }
     
+    var bufferedDurationMs: Int64 {
+        lock.lock(); defer { lock.unlock() }
+        guard let first = buffer.first, let last = buffer.last else { return 0 }
+        return last.ptsMs - first.ptsMs
+    }
+    
     func push(_ pkt: UnsafeMutablePointer<AVPacket>, ptsMs: Int64, isKey: Bool) {
 
         readStart = true
