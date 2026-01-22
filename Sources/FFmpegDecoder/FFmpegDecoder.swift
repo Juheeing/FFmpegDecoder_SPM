@@ -28,10 +28,18 @@ public final class FFmpegDecoder: @unchecked Sendable {
     
     public weak var delegate: FFmpegDecoderDelegate?
     public private(set) var state: FFmpegDecoderState = .initialized {
-        didSet { delegate?.decoder(self, didChangeState: state) }
+        didSet {
+            DispatchQueue.main.async {
+                self.delegate?.decoder(self, didChangeState: self.state)
+            }
+        }
     }
     public private(set) var isSeeking = false {
-        didSet { delegate?.decoder(self, didReceiveSeeking: isSeeking) }
+        didSet {
+            DispatchQueue.main.async {
+                self.delegate?.decoder(self, didReceiveSeeking: self.isSeeking)
+            }
+        }
     }
     // MARK: - FFmpeg C contexts (UnsafeMutablePointer)
     private var formatCtx: UnsafeMutablePointer<AVFormatContext>?
@@ -179,7 +187,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
         // 해상도 delegate 전달
         let size = CGSize(width: Int(width),
                           height: Int(height))
-        delegate?.decoder(self, didReceiveVideoSize: size)
+        
+        DispatchQueue.main.async {
+            self.delegate?.decoder(self, didReceiveVideoSize: size)
+        }
     }
     
     private func prepareAudioDecoder() {
@@ -345,7 +356,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
             if sendPacket(ctx: videoCodecCtx, packet: pkt) >= 0 {
                 while receiveFrame(ctx: videoCodecCtx, frame: vFrame) >= 0 {
                     syncVideo(targetPtsMs: ptsMs)
-                    DispatchQueue.main.sync {
+                    DispatchQueue.main.async {
                         self.delegate?.decoder(self, didUpdateCurrentTime: ptsMs / 1000)
                     }
                     drawImage()
