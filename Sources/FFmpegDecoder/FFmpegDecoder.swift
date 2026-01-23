@@ -739,9 +739,26 @@ public final class FFmpegDecoder: @unchecked Sendable {
         print("FFmpeg## Resume")
     }
 
-    public func seek(_ seconds: Double) {
-        readQueue.async { [weak self] in
-            self?.performSeek(seconds: seconds)
+    public func seek(to seconds: Double) {
+        let targetMs = Int64(seconds * 1000)
+
+        decodeQueue.async { [weak self] in
+            guard let self else { return }
+
+            if self.packetBuffer.seek(to: targetMs) {
+                print("FFmpeg## Local seek 성공")
+                DispatchQueue.main.async {
+                    self.seekSuccess = true
+                }
+                self.resetPlaybackClock(targetMs: targetMs)
+                return
+            }
+
+            print("FFmpeg## Local seek 실패 → FFmpeg seek fallback")
+
+            self.readQueue.async {
+                self.performSeek(seconds: seconds)
+            }
         }
     }
     
@@ -803,6 +820,21 @@ public final class FFmpegDecoder: @unchecked Sendable {
         print("FFmpeg## seek 완료")
     }
 
+    private func resetPlaybackClock(targetMs: Int64) {
+        pauseCondition.lock()
+
+        waitingForKeyFrame = true
+        firstVideoPtsMs = nil
+        playStartSystemTime = nil
+        isStarting = true
+
+        pauseCondition.signal()
+        pauseCondition.unlock()
+
+        DispatchQueue.main.async {
+            self.delegate?.decoder(self, didUpdateCurrentTime: targetMs / 1000)
+        }
+    }
     
     public func stopDecoding() {
         pauseCondition.lock()

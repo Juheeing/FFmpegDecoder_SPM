@@ -65,6 +65,38 @@ final class PacketRingBuffer {
         return item
     }
     
+    func seek(to targetMs: Int64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard !buffer.isEmpty else { return false }
+
+        // target 이전 패킷 중 가장 가까운 keyframe 찾기
+        var index: Int?
+
+        for i in stride(from: buffer.count - 1, through: 0, by: -1) {
+            let item = buffer[i]
+            if item.ptsMs <= targetMs && item.isKey {
+                index = i
+                break
+            }
+        }
+
+        guard let foundIndex = index else {
+            return false
+        }
+
+        // foundIndex 이전 패킷 제거
+        for i in 0..<foundIndex {
+            av_packet_free(&buffer[i].pkt)
+            buffer[i].pkt = nil
+        }
+        buffer.removeFirst(foundIndex)
+
+        print("FFmpeg## PacketBuffer local seek success → \(buffer.first?.ptsMs ?? 0)ms")
+        return true
+    }
+    
     func clear() {
         lock.lock()
         readStart = false
