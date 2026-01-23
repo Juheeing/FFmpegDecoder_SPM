@@ -59,6 +59,8 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private var decodingStopped = false
     private var readStopped = false
     private var isPaused = false
+    private var isSeeking = false
+    private var seekTarget: Int64 = 0
 
     // MARK: - Video Convert
     private var swsCtx: OpaquePointer?
@@ -306,6 +308,19 @@ public final class FFmpegDecoder: @unchecked Sendable {
             pauseCondition.lock()
             while isPaused {
                 if state != .paused { state = .paused }
+                
+                if isSeeking {
+                    isSeeking = false
+                    if self.packetBuffer.seek(to: seekTarget) {
+                        print("FFmpeg## Local seek 성공")
+                        DispatchQueue.main.async {
+                            self.seekSuccess = true
+                        }
+                        self.resetPlaybackClock(targetMs: seekTarget)
+                        return
+                    }
+                    print("FFmpeg## Local seek 실패 → FFmpeg seek fallback")
+                }
                 pauseCondition.wait()
             }
             pauseCondition.unlock()
@@ -740,26 +755,13 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
 
     public func seek(to seconds: Double) {
-        let targetMs = Int64(seconds * 1000)
-
-        decodeQueue.async { [weak self] in
-            guard let self else { return }
-
-            if self.packetBuffer.seek(to: targetMs) {
-                print("FFmpeg## Local seek 성공")
-                DispatchQueue.main.async {
-                    self.seekSuccess = true
-                }
-                self.resetPlaybackClock(targetMs: targetMs)
-                return
-            }
-
-            print("FFmpeg## Local seek 실패 → FFmpeg seek fallback")
-
-            self.readQueue.async {
-                self.performSeek(seconds: seconds)
-            }
-        }
+        pauseCondition.lock()
+        
+        seekTarget = Int64(seconds * 1000)
+        isSeeking = true
+        
+        pauseCondition.signal()
+        pauseCondition.unlock()
     }
     
     private func performSeek(seconds: Double) {
