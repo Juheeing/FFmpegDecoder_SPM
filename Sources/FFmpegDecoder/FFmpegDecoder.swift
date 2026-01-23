@@ -34,10 +34,10 @@ public final class FFmpegDecoder: @unchecked Sendable {
             }
         }
     }
-    public private(set) var isSeeking = false {
+    public private(set) var seekSuccess = false {
         didSet {
             DispatchQueue.main.async {
-                self.delegate?.decoder(self, didReceiveSeeking: self.isSeeking)
+                self.delegate?.decoder(self, didReceiveSeeking: self.seekSuccess)
             }
         }
     }
@@ -329,11 +329,11 @@ public final class FFmpegDecoder: @unchecked Sendable {
                 continue
             }
             
-            /*if waitingForKeyFrame && !item.isKey {
+            if waitingForKeyFrame && !item.isKey {
                 av_packet_free(&item.pkt)
                 continue
             }
-            waitingForKeyFrame = false*/
+            waitingForKeyFrame = false
 
             guard let pkt = item.pkt else { return }
 
@@ -739,6 +739,71 @@ public final class FFmpegDecoder: @unchecked Sendable {
         print("FFmpeg## Resume")
     }
 
+    public func seek(_ seconds: Double) {
+        readQueue.async { [weak self] in
+            self?.performSeek(seconds: seconds)
+        }
+    }
+    
+    private func performSeek(seconds: Double) {
+
+        guard let formatCtx,
+              videoStreamIndex >= 0,
+              let videoStream else {
+            print("FFmpeg## seek 실패 - context 없음")
+            return
+        }
+
+        print("FFmpeg## seek 요청: \(seconds)s")
+
+        pauseCondition.lock()
+        isPaused = true
+        pauseCondition.unlock()
+
+        let timeBase = videoStream.pointee.time_base
+        let targetPts = Int64(seconds / av_q2d(timeBase))
+
+        let ret = av_seek_frame(
+            formatCtx,
+            videoStreamIndex,
+            targetPts,
+            AVSEEK_FLAG_BACKWARD
+        )
+
+        if ret < 0 {
+            print("FFmpeg## av_seek_frame 실패: \(ret)")
+            resume()
+            return
+        }
+
+        if let videoCodecCtx {
+            avcodec_flush_buffers(videoCodecCtx)
+        }
+        if let audioCodecCtx {
+            avcodec_flush_buffers(audioCodecCtx)
+        }
+
+        packetBuffer.clear()
+
+        firstVideoPtsMs = nil
+        playStartSystemTime = nil
+        isStarting = true
+        waitingForKeyFrame = true
+
+        readStopped = false
+
+        pauseCondition.lock()
+        isPaused = false
+        pauseCondition.signal()
+        pauseCondition.unlock()
+
+        DispatchQueue.main.async {
+            self.seekSuccess = true
+        }
+        print("FFmpeg## seek 완료")
+    }
+
+    
     public func stopDecoding() {
         pauseCondition.lock()
         
