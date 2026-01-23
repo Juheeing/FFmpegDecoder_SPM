@@ -52,6 +52,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private var decodingStopped = false
     private var readStopped = false
     private var isPaused = false
+    private var isSeeking = false
     
     // MARK: - Video Convert
     private var swsCtx: OpaquePointer?
@@ -76,6 +77,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
     private var playStartSystemTime: TimeInterval?
     private var waitingForKeyFrame = true
     private var isStarting = true
+    private var seekTarget: Int64 = 0
     
     // MARK: - Thrades
     private let decodeQueue = DispatchQueue(label: "ffmpeg.decode.queue")
@@ -299,7 +301,12 @@ public final class FFmpegDecoder: @unchecked Sendable {
             pauseCondition.lock()
             while isPaused {
                 if state != .paused { state = .paused }
-
+                
+                if isSeeking {
+                    isSeeking = false
+                    performSeek(seekTarget)
+                }
+                
                 pauseCondition.wait()
             }
             pauseCondition.unlock()
@@ -734,15 +741,12 @@ public final class FFmpegDecoder: @unchecked Sendable {
     }
     
     public func seek(_ seconds: Double) {
-        let targetPtsMs = Int64(seconds * 1000)
+        seekTarget = Int64(seconds * 1000)
 
         pauseCondition.lock()
+        isSeeking = true
         pauseCondition.signal()
         pauseCondition.unlock()
-
-        decodeQueue.async { [weak self] in
-            self?.performSeek(targetPtsMs)
-        }
     }
 
     private func performSeek(_ targetPtsMs: Int64) {
