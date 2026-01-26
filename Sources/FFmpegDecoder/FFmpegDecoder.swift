@@ -727,7 +727,6 @@ public final class FFmpegDecoder: @unchecked Sendable {
         
         pauseCondition.lock()
         
-        waitingForKeyFrame = true
         isPaused = false
                     
         firstVideoPtsMs = nil
@@ -753,8 +752,9 @@ public final class FFmpegDecoder: @unchecked Sendable {
         print("FFmpeg## seek target = \(targetPtsMs)ms")
 
         flushDecoder()
-
         resetPlaybackClock()
+
+        var didSeekInBuffer = false
 
         if packetBuffer.contains(ptsMs: targetPtsMs) {
             print("FFmpeg## buffer seek")
@@ -762,12 +762,20 @@ public final class FFmpegDecoder: @unchecked Sendable {
             let ok = packetBuffer.seekToNearestKeyFrame(before: targetPtsMs)
             if ok {
                 waitingForKeyFrame = false
-                return
+                didSeekInBuffer = true
             }
         }
 
-        print("FFmpeg## demux seek")
-        seekDemux(targetPtsMs)
+        if !didSeekInBuffer {
+            print("FFmpeg## demux seek")
+            seekDemux(targetPtsMs)
+            waitingForKeyFrame = true
+        }
+
+        pauseCondition.lock()
+        isPaused = false
+        pauseCondition.signal()
+        pauseCondition.unlock()
     }
 
     private func flushDecoder() {
@@ -810,6 +818,7 @@ public final class FFmpegDecoder: @unchecked Sendable {
 
             print("FFmpeg## av_seek_frame ret = \(ret)")
 
+            avformat_flush(self.formatCtx)
             self.waitingForKeyFrame = true
         }
     }
