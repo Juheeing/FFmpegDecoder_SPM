@@ -25,11 +25,14 @@ final class PacketRingBuffer {
     private var buffer: [Item] = []
     private let maxCount = 3600
     private let lock = NSLock()
-    private var readIndex: Int = 0
+    private var readStart = false
     
     var isEmpty: Bool {
-        lock.lock(); defer { lock.unlock() }
-        return readIndex >= buffer.count
+        if !readStart { return false }
+        lock.lock()
+        let empty = buffer.isEmpty
+        lock.unlock()
+        return empty
     }
     
     var bufferedDurationMs: Int64 {
@@ -39,78 +42,37 @@ final class PacketRingBuffer {
     }
     
     func push(_ pkt: UnsafeMutablePointer<AVPacket>, ptsMs: Int64, isKey: Bool) {
+
+        readStart = true
+        
         let item = Item(pkt: pkt, ptsMs: ptsMs, isKey: isKey)
 
         lock.lock()
         buffer.append(item)
 
-        // 읽은 영역 정리
         if buffer.count > maxCount {
-            let cleanupCount = min(readIndex, buffer.count - maxCount)
-            if cleanupCount > 0 {
-                for i in 0..<cleanupCount {
-                    var pkt = buffer[i].pkt
-                    av_packet_free(&pkt)
-                    buffer[i].pkt = nil
-                }
-                buffer.removeFirst(cleanupCount)
-                readIndex -= cleanupCount
-            }
+            let drop = buffer.removeFirst()
+            av_packet_free(&drop.pkt)
+            drop.pkt = nil
         }
         lock.unlock()
     }
 
     func pop() -> Item? {
         lock.lock()
-        
-        guard readIndex < buffer.count else {
-            return nil
-        }
-
-        let item = buffer[readIndex]
-        readIndex += 1
-        
+        let item = buffer.isEmpty ? nil : buffer.removeFirst()
         lock.unlock()
         return item
     }
     
     func clear() {
         lock.lock()
+        readStart = false
         for i in 0..<buffer.count {
             av_packet_free(&buffer[i].pkt)
             buffer[i].pkt = nil
         }
         buffer.removeAll()
         lock.unlock()
-    }
-}
-
-extension PacketRingBuffer {
-
-    func contains(ptsMs: Int64) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        guard let first = buffer.first, let last = buffer.last else {
-            return false
-        }
-        return first.ptsMs <= ptsMs && ptsMs <= last.ptsMs
-    }
-
-    func seekToNearestKeyFrame(before ptsMs: Int64) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-
-        var candidate: Int?
-
-        for i in 0..<buffer.count {
-            let item = buffer[i]
-            if item.isKey && item.ptsMs <= ptsMs {
-                candidate = i
-            }
-        }
-
-        if let idx = candidate {
-            readIndex = idx
-            return true
-        }
-        return false
     }
 }
