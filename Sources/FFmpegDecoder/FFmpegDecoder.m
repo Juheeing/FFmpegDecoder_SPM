@@ -1,30 +1,49 @@
 #import "FFmpegDecoder.h"
 
 @implementation FFmpegDecoder {
-    struct SwsContext* swsCtx;
-    AVFormatContext *pFormatContext;
-    AVCodecContext *pVCtx, *pACtx;
+    // MARK: FFmpeg Core (리소스 관리)
+    AVFormatContext   *pFormatContext;
+    AVCodecContext    *pVCtx, *pACtx;
     AVCodecParameters *pVPara, *pAPara;
-    AVCodec *pVCodec, *pACodec;
-    AVStream* pVStream, * pAStream;
-    AVPacket packet;
-    AVFrame *vFrame, *aFrame;
-    CGSize outputFrameSize;
-    dispatch_queue_t mDecodingQueue;
-    uint8_t *dst_data[4];
-    int dst_linesize[4];
-    int vidx, aidx;
-    BOOL decodingStopped;
-    BOOL isPaused, isPlaying, isSeeking;
-    double seekTarget;
-    NSCondition *pauseCondition;
-    int64_t lastRescaledPTS;      // 이전 프레임 pts (rescaled)
-    int64_t ptsOffset;           // 누적 offset
-    BOOL hasPendingSeek;         // seek 직후 첫 프레임에서 보정할 플래그
-    double pendingSeekSeconds;   // 사용자가 요청한 seek 시간
+    AVCodec           *pVCodec, *pACodec;
+    AVStream          *pVStream, *pAStream;
+    AVPacket           packet;
+    AVFrame           *vFrame, *aFrame;
+    struct SwsContext *swsCtx;
+    int                vidx, aidx;
+
+    // MARK: Playback Control (재생 및 스레드 상태)
+    NSCondition      *pauseCondition;
+    dispatch_queue_t  mDecodingQueue;
+    int               currentState;
+    BOOL              decodingStopped;
+    BOOL              isPaused;
+    BOOL              isPlaying;
+    BOOL              isSeeking;
+
+    // MARK: Time Sync & Seek (시간 동기화 핵심)
+    double  videoStartClock;      // 재생 시작 시점의 시스템 절대 시각
+    int64_t videoStartPTS;        // 첫 프레임의 기준 PTS
+    double  pauseStartTime;       // 일시정지 버튼 누른 시각
+    
+    double  seekTarget;           // 사용자가 이동하려는 목표 시간(초)
+    BOOL    hasPendingSeek;       // Seek 후 첫 프레임 보정 대기 상태
+    double  pendingSeekSeconds;   // 보정용 목표 초
+    
+    int64_t lastRescaledPTS;      // 이전 프레임 PTS (정규화된 값)
+    int64_t ptsOffset;            // 타임라인 단절 시 누적할 오프셋
+    int64_t lastVideoPTS;         // 마지막 처리된 비디오 PTS
+
+    BOOL               audioReady;
+
+    // MARK: Video Output & Image Processing
+    CGSize  outputFrameSize;
     double currentBrightness, currentContrast;
-    int currentState;
     float prevContrast, prevBrightness;
+    
+    // YUV->RGB 변환이나 필터 적용 시 사용하는 버퍼
+    uint8_t *dst_data[4];
+    int      dst_linesize[4];
 }
 
 + (instancetype)sharedInstance {
@@ -36,23 +55,34 @@
     return sharedInstance;
 }
 
-- (id) init {
-    if (self = [super init]) {
+- (id)init {
+    self = [super init];
+    if (self) {
+        // 제어 관련
         mDecodingQueue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
         pauseCondition = [[NSCondition alloc] init];
+        
+        // 상태 초기화
         decodingStopped = NO;
-        isPaused = NO;
-        isSeeking = NO;
-        isPlaying = YES;
+        isPaused        = NO;
+        isSeeking       = NO;
+        isPlaying       = YES;
+        currentState    = 0;
+
+        // 시간/PTS 관련 초기화
         lastRescaledPTS = -1;
-        ptsOffset = 0;
-        hasPendingSeek = NO;
-        pendingSeekSeconds = 0;
+        ptsOffset       = 0;
+        lastVideoPTS    = -1;
+        videoStartPTS   = AV_NOPTS_VALUE;
+        hasPendingSeek  = NO;
+
+        // 필터 기본값
         currentBrightness = 0.0;
-        currentContrast = 1.0;
-        currentState = 0;
-        prevContrast = 0.0;
-        prevBrightness = 0.0;
+        currentContrast   = 1.0;
+        prevBrightness    = 0.0;
+        prevContrast      = 0.0;
+        
+        audioReady        = NO;
     }
     return self;
 }
@@ -76,16 +106,15 @@
     if ([self.player isPlaying]) { [self.player stop]; }
 }
 
-- (void)startStreaming:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options {
+- (void)startStreaming:(NSString *)url {
     decodingStopped = NO;
     dispatch_async(mDecodingQueue, ^{
-        [self openFile:url withOptions:options];
+        [self openFile: url];
     });
 }
 
 - (void)stopDecoding {
     NSLog(@"FFmpeg## stopDecoding");
-    if (currentState != 0) { [self sendCurrentState:0]; }
     [self->pauseCondition lock];
     self->decodingStopped = YES;
     [self->pauseCondition signal];
@@ -99,7 +128,10 @@
 - (void)pause {
     dispatch_async(mDecodingQueue, ^{
         [self->pauseCondition lock];
-        self->isPaused = YES;
+        if (!self->isPaused) {
+            self->isPaused = YES;
+            self->pauseStartTime = [[NSProcessInfo processInfo] systemUptime]; // 멈춘 시점 기록
+        }
         [self->pauseCondition unlock];
     });
 }
@@ -107,8 +139,20 @@
 - (void)resume {
     dispatch_async(mDecodingQueue, ^{
         [self->pauseCondition lock];
-        self->isPaused = NO;
-        [self->pauseCondition signal];
+        if (self->isPaused) {
+            // 멈춰있던 시간만큼 시작 시각을 뒤로 밀어줌 (보정)
+            double pauseDuration = [[NSProcessInfo processInfo] systemUptime] - self->pauseStartTime;
+            self->videoStartClock += pauseDuration;
+            
+            self->isPaused = NO;
+            
+            if (!self.engine.isRunning) {
+                [self.engine startAndReturnError:nil];
+            }
+            [self.player play];
+            
+            [self->pauseCondition signal];
+        }
         [self->pauseCondition unlock];
     });
 }
@@ -132,35 +176,35 @@
 }
 
 - (void)sendCurrentState:(int)state {
-    dispatch_sync(dispatch_get_main_queue(), ^{
+    dispatch_async(dispatch_get_main_queue(), ^{
         [self->_delegate receivedState:state];
     });
 }
 
-- (void)openFile:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options {
+- (void) openFile:(NSString *)url {
     NSLog(@"FFmpeg## openFile: %@", url);
     
-    if (currentState != 0) { [self sendCurrentState:0]; }
+    if (currentState != 0) {
+        [self sendCurrentState:0];
+    }
     av_log_set_level(AV_LOG_DEBUG);
     avformat_network_init();
     pFormatContext = avformat_alloc_context();
     
     AVDictionary *opts = 0;
-    
-    for (NSString *key in options) {
-        NSString *value = options[key];
-        av_dict_set(&opts, [key UTF8String], [value UTF8String], 0);
-    }
+    int ret = 0;
 
     //미디어 파일 열기
     //파일의 헤더로 부터 파일 포맷에 대한 정보를 읽어낸 뒤 첫번째 인자 (AVFormatContext) 에 저장.
     //그 뒤의 인자들은 각각 Input Source (스트리밍 URL이나 파일경로), Input Format, demuxer의 추가옵션.
-    int ret = avformat_open_input(&pFormatContext, [url UTF8String], NULL, &opts);
+    ret = avformat_open_input(&pFormatContext, [url UTF8String], NULL, &opts);
     
     if (ret != 0) {
         NSLog(@"FFmpeg## File Open Failed");
         [self stopDecoding];
-        if (currentState != 7) { [self sendCurrentState:7]; }
+        if (currentState != 7) {
+            [self sendCurrentState:7];
+        }
         return;
     }
     
@@ -181,108 +225,120 @@
     
     // 비디오 코덱 오픈
     if (vidx >= 0) {
-        pVStream = pFormatContext->streams[vidx];
-        pVPara = pVStream->codecpar;
-        NSLog(@"FFmpeg## 비디오 codec_id: %d (%s)", pVPara->codec_id, avcodec_get_name(pVPara->codec_id));
-        
-        pVCodec = (AVCodec*) avcodec_find_decoder(pVPara->codec_id);
-        if (!pVCodec) {
-            NSLog(@"FFmpeg## 비디오 코덱을 찾을 수 없습니다. codec_id = %d", pVPara->codec_id);
-            if (currentState != 7) { [self sendCurrentState:7]; }
-            return;
+       pVStream = pFormatContext->streams[vidx];
+       pVPara = pVStream->codecpar;
+       pVCodec = (AVCodec*) avcodec_find_decoder(pVPara->codec_id);
+       pVCtx = avcodec_alloc_context3(pVCodec);
+       avcodec_parameters_to_context(pVCtx, pVPara);
+        pVCtx->pix_fmt = AV_PIX_FMT_VIDEOTOOLBOX;
+        AVBufferRef *hwDeviceCtx = NULL;
+
+        int err = av_hwdevice_ctx_create(
+            &hwDeviceCtx,
+            AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+            NULL,
+            NULL,
+            0
+        );
+
+        if (err < 0) {
+            NSLog(@"❌ Failed to create VideoToolbox device");
         } else {
-            pVCtx = avcodec_alloc_context3(pVCodec);
-            avcodec_parameters_to_context(pVCtx, pVPara);
-            avcodec_open2(pVCtx, pVCodec, NULL);
-            NSLog(@"FFmpeg## 비디오 코덱 : %d, %s(%s)\n",
-                  pVCodec->id,
-                  pVCodec->name,
-                  pVCodec->long_name ? pVCodec->long_name : "N/A");
+            pVCtx->hw_device_ctx = av_buffer_ref(hwDeviceCtx);
         }
+       avcodec_open2(pVCtx, pVCodec, NULL);
+       NSLog(@"FFmpeg## 비디오 코덱 : %d, %s(%s)\n", pVCodec->id, pVCodec->name, pVCodec->long_name);
     }
     // 오디오 코덱 오픈
     if (aidx >= 0) {
-        pAStream = pFormatContext->streams[aidx];
-        pAPara = pAStream->codecpar;
-        NSLog(@"FFmpeg## 오디오 codec_id: %d (%s)", pAPara->codec_id, avcodec_get_name(pAPara->codec_id));
-        
-        pACodec = (AVCodec*) avcodec_find_decoder(pAPara->codec_id);
-        if (!pACodec) {
-            NSLog(@"FFmpeg## 오디오 코덱을 찾을 수 없습니다. codec_id = %d", pAPara->codec_id);
-            if (currentState != 7) { [self sendCurrentState:7]; }
-            return;
-        } else {
-            pACtx = avcodec_alloc_context3(pACodec);
-            avcodec_parameters_to_context(pACtx, pAPara);
-            avcodec_open2(pACtx, pACodec, NULL);
-            NSLog(@"FFmpeg## 오디오 코덱 : %d, %s(%s)\n",
-                  pACodec->id,
-                  pACodec->name,
-                  pACodec->long_name ? pACodec->long_name : "N/A");
-        }
+       pAStream = pFormatContext->streams[aidx];
+       pAPara = pAStream->codecpar;
+       pACodec = (AVCodec*) avcodec_find_decoder(pAPara->codec_id);
+       pACtx = avcodec_alloc_context3(pACodec);
+       avcodec_parameters_to_context(pACtx, pAPara);
+       avcodec_open2(pACtx, pACodec, NULL);
+       NSLog(@"FFmpeg## 오디오 코덱 : %d, %s(%s)\n", pACodec->id, pACodec->name, pACodec->long_name);
+    }
+
+    if (pVCodec == NULL) {
+        NSLog(@"FFmpeg## No Video Decoder");
     }
     
+    if (pACodec == NULL) {
+        NSLog(@"FFmpeg## No Audio Decoder");
+    }
     [self decoding];
 }
 
 //파일로부터 인코딩 된 비디오, 오디오 데이터를 읽어서 packet에 저장하는 함수
 - (void) decoding {
     
-    if (currentState != 1) { [self sendCurrentState:1]; }
+    if (currentState != 1) {
+        [self sendCurrentState:1];
+    }
     vFrame = av_frame_alloc();
     aFrame = av_frame_alloc();
     packet = *av_packet_alloc();
     
+    videoStartClock = [[NSProcessInfo processInfo] systemUptime];
+    videoStartPTS = AV_NOPTS_VALUE;
+    
     outputFrameSize = CGSizeMake(self->pVCtx->width, self->pVCtx->height);
+        
     NSLog(@"FFmpeg## Video Resolution: %.0f x %.0f", outputFrameSize.width, outputFrameSize.height);
         
     while (!self->decodingStopped && pFormatContext != NULL) {
-        
-        if (currentState != 2) { [self sendCurrentState:2]; }
-        
-        while (!self->decodingStopped && [self readFrame:&packet] >= 0) {
-            
-            [self->_delegate receivedVideoSize:outputFrameSize];
-            
-            [self->pauseCondition lock];
-            
-            while (!self->decodingStopped && self->isPaused) {
-                [self readPause];
-                if (_player.isPlaying) {
-                    [_player pause];
-                }
-                if (self->isSeeking) {
-                    NSLog(@"FFmpeg## readSeek");
-                    self->isSeeking = NO;
-                    [self readSeek:seekTarget];
-                }
-                [self->pauseCondition wait];
+        @autoreleasepool {
+            if (currentState != 2) {
+                [self sendCurrentState:2];
             }
-            [self->pauseCondition unlock];
-            
-            if (!self->isPlaying) {
-                [self readPlay];
-                if (currentState != 2) { [self sendCurrentState:2]; }
-            }
-
-            if (packet.stream_index == vidx) {
-                if ([self sendPacket:pVCtx packet:&packet] >= 0) {
-                    int ret = [self receiveFrame:pVCtx frame:vFrame];
-                    if (ret >= 0) {
-                        [self getCurrentTime:vFrame stream:pVStream];
-                        [self drawImage];
+            while (!self->decodingStopped && [self readFrame:&packet] >= 0) {
+                [self->_delegate receivedVideoSize:outputFrameSize];
+                [self->pauseCondition lock];
+                while (!self->decodingStopped && self->isPaused) {
+                    if (currentState != 5) {
+                        [self sendCurrentState:5];
+                    }
+                    [self readPause];
+                    if (_player.isPlaying) {
+                        [_player pause];
+                    }
+                    if (self->isSeeking) {
+                        NSLog(@"FFmpeg## readSeek");
+                        self->isSeeking = NO;
+                        [self readSeek:seekTarget];
+                    }
+                    [self->pauseCondition wait];
+                }
+                [self->pauseCondition unlock];
+                
+                if (!self->isPlaying) {
+                    [self readPlay];
+                    if (currentState != 2) {
+                        [self sendCurrentState:2];
                     }
                 }
-            }
-            if (packet.stream_index == aidx) {
-                if ([self sendPacket:pACtx packet:&packet] >= 0) {
-                    int ret = [self receiveFrame:pACtx frame:aFrame];
-                    if (ret >= 0) {
-                        [self drawAudio];
+                
+                if (packet.stream_index == vidx) {
+                    if ([self sendPacket:pVCtx packet:&packet] >= 0) {
+                        int ret = [self receiveFrame:pVCtx frame:vFrame];
+                        if (ret >= 0) {
+                            [self syncVideoFrame:vFrame stream:pVStream];
+                            [self getCurrentTime:vFrame stream:pVStream];
+                            [self drawImage];
+                        }
                     }
                 }
+                if (packet.stream_index == aidx) {
+                    if ([self sendPacket:pACtx packet:&packet] >= 0) {
+                        int ret = [self receiveFrame:pACtx frame:aFrame];
+                        if (ret >= 0) {
+                            [self drawAudio];
+                        }
+                    }
+                }
+                av_packet_unref(&packet);
             }
-            av_packet_unref(&packet);
         }
     }
     [self clear];
@@ -298,11 +354,15 @@
             if (ret == AVERROR_EOF) {
                 NSLog(@"FFmpeg## readFrame EOF");
                 [self stopDecoding];
-                if (currentState != 6) { [self sendCurrentState:6]; }
+                if (currentState != 6) {
+                    [self sendCurrentState:6];
+                }
             }
         } @catch (NSException *exception) {
             NSLog(@"FFmpeg## av_read_frame error: %@", exception);
-            if (currentState != 7) { [self sendCurrentState:7]; }
+            if (currentState != 7) {
+                [self sendCurrentState:7];
+            }
         }
     }
     return ret;
@@ -316,7 +376,9 @@
             ret = avcodec_send_packet(ctx, packet);
         } @catch (NSException *exception) {
             NSLog(@"FFmpeg## avcodec_send_packet error");
-            if (currentState != 7) { [self sendCurrentState:7]; }
+            if (currentState != 7) {
+                [self sendCurrentState:7];
+            }
         }
     }
     return ret;
@@ -330,7 +392,9 @@
             ret = avcodec_receive_frame(ctx, frame);
         } @catch (NSException *exception) {
             NSLog(@"FFmpeg## avcodec_receive_frame error");
-            if (currentState != 7) { [self sendCurrentState:7]; }
+            if (currentState != 7) {
+                [self sendCurrentState:7];
+            }
         }
     }
     return ret;
@@ -343,16 +407,15 @@
     @try {
         isPlaying = YES;
         ret = av_read_play(pFormatContext);
-        if (ret < 0) {
-            NSLog(@"FFmpeg## av_read_play error %d, errno? [%d]", ret, errno);
-            if (currentState != 7) { [self sendCurrentState:7]; }
-        } else {
-            NSLog(@"FFmpeg## av_read_play: %d", ret);
-            if (currentState != 4) { [self sendCurrentState:4]; }
+        NSLog(@"FFmpeg## av_read_play: %d", ret);
+        if (currentState != 4) {
+            [self sendCurrentState:4];
         }
     } @catch (NSException *exception) {
         NSLog(@"FFmpeg## av_read_play error %@", exception);
-        if (currentState != 7) { [self sendCurrentState:7]; }
+        if (currentState != 7) {
+            [self sendCurrentState:7];
+        }
     }
     
     return ret;
@@ -365,16 +428,12 @@
     @try {
         isPlaying = NO;
         ret = av_read_pause(pFormatContext);
-        if (ret < 0) {
-            NSLog(@"FFmpeg## av_read_pause error %d, errno? [%d]", ret, errno);
-            if (currentState != 7) { [self sendCurrentState:7]; }
-        } else {
-            NSLog(@"FFmpeg## av_read_pause: %d", ret);
-            if (currentState != 5) { [self sendCurrentState:5]; }
-        }
+        NSLog(@"FFmpeg## av_read_pause: %d", ret);
     } @catch (NSException *exception) {
         NSLog(@"FFmpeg## av_read_pause error %@", exception);
-        if (currentState != 7) { [self sendCurrentState:7]; }
+        if (currentState != 7) {
+            [self sendCurrentState:7];
+        }
     }
     
     return ret;
@@ -386,7 +445,9 @@
     @try {
         if (seconds < 0 || !pFormatContext) {
             NSLog(@"FFmpeg## Invalid seek time or context is NULL");
-            if (currentState != 7) { [self sendCurrentState:7]; }
+            if (currentState != 7) {
+                [self sendCurrentState:7];
+            }
             return -1;
         }
 
@@ -408,16 +469,20 @@
 
         if (ret < 0) {
             NSLog(@"FFmpeg## Seek failed");
-            if (currentState != 7) { [self sendCurrentState:7]; }
+            if (currentState != 7) {
+                [self sendCurrentState:7];
+            }
             hasPendingSeek = NO;
         } else {
-            dispatch_sync(dispatch_get_main_queue(), ^{
+            dispatch_async(dispatch_get_main_queue(), ^{
                 [self->_delegate receivedSeekingState:YES];
             });
         }
     } @catch (NSException *exception) {
         NSLog(@"FFmpeg## av_seek_frame exception: %@", exception);
-        if (currentState != 7) { [self sendCurrentState:7]; }
+        if (currentState != 7) {
+            [self sendCurrentState:7];
+        }
         ret = -1;
         hasPendingSeek = NO;
     }
@@ -451,56 +516,52 @@
         currentTime = rescaled_pts + ptsOffset;
     }
 
-    dispatch_sync(dispatch_get_main_queue(), ^{
+    dispatch_async(dispatch_get_main_queue(), ^{
         [self->_delegate receivedCurrentTime:currentTime duration:totalDuration];
     });
+}
+
+- (void)syncVideoFrame:(AVFrame *)frame stream:(AVStream *)stream {
+
+    int64_t pts = frame->best_effort_timestamp;
+    if (pts == AV_NOPTS_VALUE) return;
+
+    double ptsSeconds = pts * av_q2d(stream->time_base);
+
+    if (videoStartPTS == AV_NOPTS_VALUE) {
+        videoStartPTS = ptsSeconds;
+        videoStartClock = [[NSProcessInfo processInfo] systemUptime];
+        return;
+    }
+
+    double elapsedReal = [[NSProcessInfo processInfo] systemUptime] - videoStartClock;
+    double elapsedVideo = ptsSeconds - videoStartPTS;
+    double delay = elapsedVideo - elapsedReal;
+
+    if (delay <= 0) return;
+
+    usleep((useconds_t)(delay * 1e6));
 }
 
 - (void)drawImage {
     int width = vFrame->width;
     int height = vFrame->height;
 
-    // 1️⃣ sws_scale에서 RGBA로 출력 (초기화 시 한 번만)
-    if (swsCtx == NULL) {
-        static int sws_flags = SWS_FAST_BILINEAR;
-        swsCtx = sws_getContext(
-            pVCtx->width,
-            pVCtx->height,
-            pVCtx->pix_fmt,
-            outputFrameSize.width,
-            outputFrameSize.height,
-            AV_PIX_FMT_RGBA,
-            sws_flags,
-            NULL, NULL, NULL
-        );
+    CVPixelBufferRef pixelBuffer = (CVPixelBufferRef)vFrame->data[3];
 
-        av_image_alloc(dst_data, dst_linesize,
-                       pVCtx->width,
-                       pVCtx->height,
-                       AV_PIX_FMT_RGBA, 1);
-    }
+    if (!pixelBuffer) return;
 
-    // 2️⃣ YUV -> RGBA 변환
-    sws_scale(swsCtx,
-              (uint8_t const * const *)vFrame->data,
-              vFrame->linesize,
-              0,
-              height,
-              dst_data,
-              dst_linesize);
+    // retain 필요 (FFmpeg가 해제할 수 있음)
+    CVPixelBufferRetain(pixelBuffer);
 
-    // 3️⃣ CIImage 생성
-    CIImage *ciImage = [CIImage imageWithBitmapData:[NSData dataWithBytesNoCopy:dst_data[0]
-                                                                         length:dst_linesize[0]*height
-                                                                   freeWhenDone:NO]
-                                      bytesPerRow:dst_linesize[0]
-                                            size:CGSizeMake(width, height)
-                                          format:kCIFormatRGBA8
-                                      colorSpace:CGColorSpaceCreateDeviceRGB()];
+    CIImage *ciImage = [CIImage imageWithCVPixelBuffer:pixelBuffer];
+
+    // 렌더 후 release
+    CVPixelBufferRelease(pixelBuffer);
 
     CIImage *outputImage = ciImage;
 
-    // 4️⃣ 밝기/대비 필터 적용: 값 변경이 있을 때만
+    // 밝기/대비 필터 적용: 값 변경이 있을 때만
     if (self->prevContrast != self->currentContrast || self->prevBrightness != self->currentBrightness) {
         CIFilter *filter = [CIFilter filterWithName:@"CIColorControls"];
         [filter setValue:ciImage forKey:kCIInputImageKey];
@@ -512,49 +573,58 @@
         self->prevContrast = self->currentContrast;
         self->prevBrightness = self->currentBrightness;
     }
-    // 5️⃣ delegate에 CIImage 직접 전달
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        [self->_delegate receivedDecodedCIImage:outputImage];
+
+    // delegate에 CIImage 직접 전달
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self->_delegate receivedDecodedCIImage:outputImage size:CGSizeMake(width, height)];
     });
 }
 
+- (void) setPlayerVolume:(float)volume {
+    if (self.player) {
+        self.player.volume = volume;
+        NSLog(@"FFmpeg## volume changed: %f", volume);
+    }
+}
 
-- (void) drawAudio {
-    AVAudioChannelLayout *channelLayout = [[AVAudioChannelLayout alloc] initWithLayoutTag:kAudioChannelLayoutTag_Stereo];
-    AVAudioFormat *format = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
-                                                             sampleRate:aFrame->sample_rate
-                                                           interleaved:NO
-                                                         channelLayout:channelLayout];
-    
-    if (![self.player isPlaying]) {
+- (void)drawAudio {
+
+    if (!audioReady) {
+        AVAudioChannelLayout *channelLayout =
+            [[AVAudioChannelLayout alloc] initWithLayoutTag:kAudioChannelLayoutTag_Stereo];
+
+        _audioFormat = [[AVAudioFormat alloc]
+            initWithCommonFormat:AVAudioPCMFormatFloat32
+            sampleRate:aFrame->sample_rate
+            interleaved:NO
+            channelLayout:channelLayout];
+
         self.engine = [[AVAudioEngine alloc] init];
         self.player = [[AVAudioPlayerNode alloc] init];
         self.player.volume = 0.5;
+
         [self.engine attachNode:self.player];
+        [self.engine connect:self.player to:self.engine.mainMixerNode format:_audioFormat];
 
-        AVAudioMixerNode *mainMixer = [self.engine mainMixerNode];
-        
-        [self.engine connect:self.player to:mainMixer format:format];
-        
-        if (!self.engine.isRunning) {
-            [self.engine prepare];
-            NSError *error;
-            BOOL success;
-            success = [self.engine startAndReturnError:&error];
-            NSAssert(success, @"couldn't start engine, %@", [error localizedDescription]);
-        }
+        NSError *error = nil;
+        [self.engine startAndReturnError:&error];
+        NSAssert(!error, @"AudioEngine error %@", error);
+
         [self.player play];
+        audioReady = YES;
     }
-    
-    NSData *data = [self playAudioFrame:aFrame];
-    AVAudioPCMBuffer *pcmBuffer = [[AVAudioPCMBuffer alloc]
-                                  initWithPCMFormat:format
-                                  frameCapacity:(uint32_t)(data.length)
-                                  /format.streamDescription->mBytesPerFrame];
 
-    pcmBuffer.frameLength = pcmBuffer.frameCapacity;
+    int frames = aFrame->nb_samples;
 
-    [data getBytes:*pcmBuffer.floatChannelData length:data.length];
+    AVAudioPCMBuffer *pcmBuffer = [[AVAudioPCMBuffer alloc] initWithPCMFormat:_audioFormat frameCapacity:frames];
+
+    pcmBuffer.frameLength = frames;
+
+    int bytesPerSample = av_get_bytes_per_sample(pACtx->sample_fmt);
+    int channels = pACtx->ch_layout.nb_channels;
+    int dataSize = frames * bytesPerSample * channels;
+
+    memcpy(pcmBuffer.floatChannelData[0], aFrame->data[0], dataSize);
 
     [self.player scheduleBuffer:pcmBuffer completionHandler:nil];
 }
