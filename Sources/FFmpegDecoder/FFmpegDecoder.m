@@ -29,6 +29,7 @@
     double  seekTarget;           // 사용자가 이동하려는 목표 시간(초)
     BOOL    hasPendingSeek;       // Seek 후 첫 프레임 보정 대기 상태
     double  pendingSeekSeconds;   // 보정용 목표 초
+    BOOL    needResetClockAfterSeek;
     
     int64_t lastRescaledPTS;      // 이전 프레임 PTS (정규화된 값)
     int64_t ptsOffset;            // 타임라인 단절 시 누적할 오프셋
@@ -75,7 +76,8 @@
         lastVideoPTS    = -1;
         videoStartPTS   = AV_NOPTS_VALUE;
         hasPendingSeek  = NO;
-
+        needResetClockAfterSeek = NO;
+        
         // 필터 기본값
         currentBrightness = 0.0;
         currentContrast   = 1.0;
@@ -474,6 +476,7 @@
             }
             hasPendingSeek = NO;
         } else {
+            needResetClockAfterSeek = YES;
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self->_delegate receivedSeekingState:YES];
             });
@@ -528,20 +531,29 @@
 
     double ptsSeconds = pts * av_q2d(stream->time_base);
 
+    // seek 직후 첫 프레임이면 기준 리셋
+    if (needResetClockAfterSeek) {
+        videoStartPTS   = ptsSeconds;
+        videoStartClock = [[NSProcessInfo processInfo] systemUptime];
+        needResetClockAfterSeek = NO;
+        return;   // 첫 프레임은 delay 계산하지 않음
+    }
+
     if (videoStartPTS == AV_NOPTS_VALUE) {
-        videoStartPTS = ptsSeconds;
+        videoStartPTS   = ptsSeconds;
         videoStartClock = [[NSProcessInfo processInfo] systemUptime];
         return;
     }
 
-    double elapsedReal = [[NSProcessInfo processInfo] systemUptime] - videoStartClock;
+    double elapsedReal  = [[NSProcessInfo processInfo] systemUptime] - videoStartClock;
     double elapsedVideo = ptsSeconds - videoStartPTS;
-    double delay = elapsedVideo - elapsedReal;
+    double delay        = elapsedVideo - elapsedReal;
 
     if (delay <= 0) return;
 
     usleep((useconds_t)(delay * 1e6));
 }
+
 
 - (void)drawImage {
     int width = vFrame->width;
