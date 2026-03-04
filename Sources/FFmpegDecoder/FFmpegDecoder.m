@@ -212,6 +212,9 @@ static int ffmpeg_interrupt_cb(void *ctx) {
     
     outputFrameSize = CGSizeMake(self->pVCtx->width, self->pVCtx->height);
     NSLog(@"FFmpeg## Video Resolution: %.0f x %.0f", outputFrameSize.width, outputFrameSize.height);
+    if (outputFrameSize.width == 0 && outputFrameSize.height == 0) {
+        if (currentState != 7) { [self sendCurrentState:7]; }
+    }
         
     while (!self->decodingStopped && pFormatContext != NULL) {
         
