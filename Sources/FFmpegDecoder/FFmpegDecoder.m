@@ -141,14 +141,44 @@ static int ffmpeg_interrupt_cb(void *ctx) {
         return;
     }
     
-    ret = avformat_find_stream_info(pFormatContext, NULL);
+    // 비디오 스트림 못찾으면 재시도
+    int maxRetry = 3;
+    for (int i = 0; i < maxRetry; i++) {
+        ret = avformat_find_stream_info(pFormatContext, NULL);
+        
+        BOOL hasVideoParams = NO;
+        for (int s = 0; s < pFormatContext->nb_streams; s++) {
+            AVStream *stream = pFormatContext->streams[s];
+            if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+                if (stream->codecpar->width > 0 && stream->codecpar->height > 0) {
+                    hasVideoParams = YES;
+                    break;
+                }
+            }
+        }
+        
+        if (hasVideoParams) {
+            NSLog(@"FFmpeg## Stream info found on attempt %d", i + 1);
+            break;
+        }
+        
+        NSLog(@"FFmpeg## Retrying find_stream_info (%d/%d)...", i + 1, maxRetry);
+        
+        // 컨텍스트 리셋 후 재시도
+        avformat_close_input(&pFormatContext);
+        pFormatContext = avformat_alloc_context();
+        pFormatContext->interrupt_callback.callback = ffmpeg_interrupt_cb;
+        pFormatContext->interrupt_callback.opaque = (__bridge void *)self;
+        
+        ret = avformat_open_input(&pFormatContext, [url UTF8String], NULL, &opts);
+        if (ret != 0) { break; }
+    }
     
     if (ret < 0 ) {
         NSLog(@"FFmpeg## Fail to get Stream Info");
         [self stopDecoding];
         return;
     }
-    
     [self openCodec];
 }
 
@@ -212,10 +242,7 @@ static int ffmpeg_interrupt_cb(void *ctx) {
     
     outputFrameSize = CGSizeMake(self->pVCtx->width, self->pVCtx->height);
     NSLog(@"FFmpeg## Video Resolution: %.0f x %.0f", outputFrameSize.width, outputFrameSize.height);
-    if (outputFrameSize.width == 0 && outputFrameSize.height == 0) {
-        if (currentState != 7) { [self sendCurrentState:7]; }
-    }
-        
+    
     while (!self->decodingStopped && pFormatContext != NULL) {
         
         if (currentState != 2) { [self sendCurrentState:2]; }
