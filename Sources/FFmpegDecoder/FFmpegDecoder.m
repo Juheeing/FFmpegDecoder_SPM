@@ -1,5 +1,5 @@
 #import "FFmpegDecoder.h"
-#define FFMPEG_DECODER_VERSION @"1.0.0"
+#define FFMPEG_DECODER_VERSION @"1.0.1"
 
 static __weak FFmpegDecoder *gCurrentDecoder = nil;
 
