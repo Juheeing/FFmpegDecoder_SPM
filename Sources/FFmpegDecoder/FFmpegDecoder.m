@@ -1,6 +1,8 @@
 #import "FFmpegDecoder.h"
 #define FFMPEG_DECODER_VERSION @"1.0.0"
 
+static __weak FFmpegDecoder *gCurrentDecoder = nil;
+
 @implementation FFmpegDecoder {
     struct SwsContext* swsCtx;
     AVFormatContext *pFormatContext;
@@ -22,15 +24,6 @@
     int64_t lastRescaledPTS;      // 이전 프레임 pts (rescaled)
     int64_t ptsOffset;           // 누적 offset
     int currentState;
-}
-
-+ (instancetype)sharedInstance {
-    static FFmpegDecoder *sharedInstance = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        sharedInstance = [[FFmpegDecoder alloc] init];
-    });
-    return sharedInstance;
 }
 
 - (id) init {
@@ -81,10 +74,9 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
     
     NSString *logMessage = [NSString stringWithUTF8String:log_buf];
 
-    dispatch_async(dispatch_get_main_queue(), ^{
-        NSLog(@"%@", logMessage);
-        [[FFmpegDecoder sharedInstance] logToFile:logMessage];
-    });
+    NSLog(@"%@", logMessage);
+    FFmpegDecoder *decoder = gCurrentDecoder;
+    if (decoder) [decoder logToFile:logMessage];
 }
 
 - (void)logToFile:(NSString *)text {
@@ -128,6 +120,7 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
 }
 
 - (void)startStreaming:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options needLog:(BOOL)needLog {
+    gCurrentDecoder = self;
     self->decodingStopped = NO;
     self->needLog = needLog;
     dispatch_async(mDecodingQueue, ^{

@@ -17,7 +17,6 @@
 @end
 
 @interface FFmpegDecoder : NSObject
-+ (instancetype)sharedInstance;
 
 @property (nonatomic, weak) id<DecoderDelegate> delegate;
 @property (nonatomic, strong)AVAudioEngine *engine;
