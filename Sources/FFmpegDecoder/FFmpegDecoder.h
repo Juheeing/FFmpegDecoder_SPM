@@ -23,9 +23,13 @@
 @property (nonatomic, strong)AVAudioEngine *engine;
 @property (nonatomic, strong)AVAudioPlayerNode *player;
 
-- (void) startStreaming:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options;
+
+- (void)startStreaming:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options needLog:(BOOL)needLog;
 - (void) stopDecoding;
 - (void) pause;
 - (void) resume;
 - (BOOL) isPlaying;
+
+- (void) logToFile:(NSString *)text;
+
 @end

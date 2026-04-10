@@ -1,4 +1,5 @@
 #import "FFmpegDecoder.h"
+#define FFMPEG_DECODER_VERSION @"1.0.0"
 
 @implementation FFmpegDecoder {
     struct SwsContext* swsCtx;
@@ -16,6 +17,7 @@
     int vidx, aidx;
     BOOL decodingStopped;
     BOOL isPaused, isPlaying;
+    BOOL needLog;
     NSCondition *pauseCondition;
     int64_t lastRescaledPTS;      // 이전 프레임 pts (rescaled)
     int64_t ptsOffset;           // 누적 offset
@@ -41,6 +43,7 @@
         lastRescaledPTS = -1;
         ptsOffset = 0;
         currentState = 0;
+        needLog = NO;
     }
     return self;
 }
@@ -69,15 +72,71 @@ static int ffmpeg_interrupt_cb(void *ctx) {
     return decoder->decodingStopped ? 1 : 0;
 }
 
-- (void)startStreaming:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options {
-    decodingStopped = NO;
+static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list vl)
+{
+    if (level > av_log_get_level()) return;
+
+    char log_buf[1024];
+    vsnprintf(log_buf, sizeof(log_buf), fmt, vl);
+    
+    NSString *logMessage = [NSString stringWithUTF8String:log_buf];
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSLog(@"%@", logMessage);
+        [[FFmpegDecoder sharedInstance] logToFile:logMessage];
+    });
+}
+
+- (void)logToFile:(NSString *)text {
+    
+    NSLog(@"%@", text);
+    
+    if (self->needLog) {
+        
+        NSDate *now = [NSDate date];
+        
+        // 파일 이름용 날짜 포맷터
+        NSDateFormatter *fileFormatter = [[NSDateFormatter alloc] init];
+        [fileFormatter setDateFormat:@"yyyy-MM-dd_HH"];
+        NSString *fileName = [[fileFormatter stringFromDate:now] stringByAppendingString:@".txt"];
+        
+        // 파일 경로 설정
+        NSFileManager *fileManager = [NSFileManager defaultManager];
+        NSURL *documentsURL = [[fileManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask] firstObject];
+        NSURL *fileURL = [documentsURL URLByAppendingPathComponent:fileName];
+        
+        // 로그에 타임스탬프 추가
+        NSDateFormatter *timestampFormatter = [[NSDateFormatter alloc] init];
+        [timestampFormatter setDateFormat:@"HH:mm:ss"];
+        NSString *timestamp = [timestampFormatter stringFromDate:now];
+        
+        NSString *logText = [NSString stringWithFormat:@"[%@] %@\n", timestamp, text];
+        NSData *logData = [logText dataUsingEncoding:NSUTF8StringEncoding];
+        
+        // 파일이 존재하면 append, 아니면 새로 생성
+        if ([fileManager fileExistsAtPath:[fileURL path]]) {
+            NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:[fileURL path]];
+            if (fileHandle) {
+                [fileHandle seekToEndOfFile];
+                [fileHandle writeData:logData];
+                [fileHandle closeFile];
+            }
+        } else {
+            [logData writeToURL:fileURL atomically:YES];
+        }
+    }
+}
+
+- (void)startStreaming:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options needLog:(BOOL)needLog {
+    self->decodingStopped = NO;
+    self->needLog = needLog;
     dispatch_async(mDecodingQueue, ^{
         [self openFile:url withOptions:options];
     });
 }
 
 - (void)stopDecoding {
-    NSLog(@"FFmpeg## stopDecoding");
+    [self logToFile:@"FFmpeg## stopDecoding"];
     if (currentState != 0) { [self sendCurrentState:0]; }
     [self->pauseCondition lock];
     self->decodingStopped = YES;
@@ -113,9 +172,11 @@ static int ffmpeg_interrupt_cb(void *ctx) {
 }
 
 - (void)openFile:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options {
-    NSLog(@"FFmpeg## openFile: %@", url);
-    
+    [self logToFile:[NSString stringWithFormat:@"FFmpeg## SPM Viersion: %@", FFMPEG_DECODER_VERSION]];
+    [self logToFile:[NSString stringWithFormat:@"FFmpeg## openFile: %@", url]];
+
     if (currentState != 0) { [self sendCurrentState:0]; }
+    av_log_set_callback(ffmpeg_log_callback);
     av_log_set_level(AV_LOG_DEBUG);
     avformat_network_init();
     pFormatContext = avformat_alloc_context();
@@ -135,7 +196,7 @@ static int ffmpeg_interrupt_cb(void *ctx) {
     int ret = avformat_open_input(&pFormatContext, [url UTF8String], NULL, &opts);
     
     if (ret != 0) {
-        NSLog(@"FFmpeg## File Open Failed");
+        [self logToFile:@"FFmpeg## File Open Failed"];
         [self stopDecoding];
         if (currentState != 7) { [self sendCurrentState:7]; }
         return;
@@ -158,12 +219,12 @@ static int ffmpeg_interrupt_cb(void *ctx) {
         }
         
         if (hasVideoParams) {
-            NSLog(@"FFmpeg## Stream info found on attempt %d", i + 1);
+            [self logToFile:[NSString stringWithFormat:@"FFmpeg## Stream info found on attempt %d", i + 1]];
             break;
         }
         
-        NSLog(@"FFmpeg## Retrying find_stream_info (%d/%d)...", i + 1, maxRetry);
-        
+        [self logToFile:[NSString stringWithFormat:@"FFmpeg## Retrying find_stream_info (%d/%d)...", i + 1, maxRetry]];
+
         // 컨텍스트 리셋 후 재시도
         avformat_close_input(&pFormatContext);
         pFormatContext = avformat_alloc_context();
@@ -175,7 +236,7 @@ static int ffmpeg_interrupt_cb(void *ctx) {
     }
     
     if (ret < 0 ) {
-        NSLog(@"FFmpeg## Fail to get Stream Info");
+        [self logToFile:@"FFmpeg## Fail to get Stream Info"];
         [self stopDecoding];
         return;
     }
@@ -190,42 +251,42 @@ static int ffmpeg_interrupt_cb(void *ctx) {
     if (vidx >= 0) {
         pVStream = pFormatContext->streams[vidx];
         pVPara = pVStream->codecpar;
-        NSLog(@"FFmpeg## 비디오 codec_id: %d (%s)", pVPara->codec_id, avcodec_get_name(pVPara->codec_id));
-        
+        [self logToFile:[NSString stringWithFormat:@"FFmpeg## 비디오 codec_id: %d (%s)", pVPara->codec_id, avcodec_get_name(pVPara->codec_id)]];
+
         pVCodec = (AVCodec*) avcodec_find_decoder(pVPara->codec_id);
         if (!pVCodec) {
-            NSLog(@"FFmpeg## 비디오 코덱을 찾을 수 없습니다. codec_id = %d", pVPara->codec_id);
+            [self logToFile:[NSString stringWithFormat:@"FFmpeg## 비디오 코덱을 찾을 수 없습니다. codec_id = %d", pVPara->codec_id]];;
             if (currentState != 7) { [self sendCurrentState:7]; }
             return;
         } else {
             pVCtx = avcodec_alloc_context3(pVCodec);
             avcodec_parameters_to_context(pVCtx, pVPara);
             avcodec_open2(pVCtx, pVCodec, NULL);
-            NSLog(@"FFmpeg## 비디오 코덱 : %d, %s(%s)\n",
-                  pVCodec->id,
-                  pVCodec->name,
-                  pVCodec->long_name ? pVCodec->long_name : "N/A");
+            [self logToFile:[NSString stringWithFormat:@"FFmpeg## 비디오 코덱 : %d, %s(%s)\n",
+                             pVCodec->id,
+                             pVCodec->name,
+                             pVCodec->long_name ? pVCodec->long_name : "N/A"]];
         }
     }
     // 오디오 코덱 오픈
     if (aidx >= 0) {
         pAStream = pFormatContext->streams[aidx];
         pAPara = pAStream->codecpar;
-        NSLog(@"FFmpeg## 오디오 codec_id: %d (%s)", pAPara->codec_id, avcodec_get_name(pAPara->codec_id));
-        
+        [self logToFile:[NSString stringWithFormat:@"FFmpeg## 오디오 codec_id: %d (%s)", pAPara->codec_id, avcodec_get_name(pAPara->codec_id)]];
+
         pACodec = (AVCodec*) avcodec_find_decoder(pAPara->codec_id);
         if (!pACodec) {
-            NSLog(@"FFmpeg## 오디오 코덱을 찾을 수 없습니다. codec_id = %d", pAPara->codec_id);
+            [self logToFile:[NSString stringWithFormat:@"FFmpeg## 오디오 코덱을 찾을 수 없습니다. codec_id = %d", pAPara->codec_id]];
             if (currentState != 7) { [self sendCurrentState:7]; }
             return;
         } else {
             pACtx = avcodec_alloc_context3(pACodec);
             avcodec_parameters_to_context(pACtx, pAPara);
             avcodec_open2(pACtx, pACodec, NULL);
-            NSLog(@"FFmpeg## 오디오 코덱 : %d, %s(%s)\n",
-                  pACodec->id,
-                  pACodec->name,
-                  pACodec->long_name ? pACodec->long_name : "N/A");
+            [self logToFile:[NSString stringWithFormat:@"FFmpeg## 오디오 코덱 : %d, %s(%s)\n",
+                             pACodec->id,
+                             pACodec->name,
+                             pACodec->long_name ? pACodec->long_name : "N/A"]];
         }
     }
     
@@ -241,8 +302,8 @@ static int ffmpeg_interrupt_cb(void *ctx) {
     packet = *av_packet_alloc();
     
     outputFrameSize = CGSizeMake(self->pVCtx->width, self->pVCtx->height);
-    NSLog(@"FFmpeg## Video Resolution: %.0f x %.0f", outputFrameSize.width, outputFrameSize.height);
-    
+    [self logToFile:[NSString stringWithFormat:@"FFmpeg## Video Resolution: %.0f x %.0f", outputFrameSize.width, outputFrameSize.height]];
+
     while (!self->decodingStopped && pFormatContext != NULL) {
         
         if (currentState != 2) { [self sendCurrentState:2]; }
@@ -298,12 +359,12 @@ static int ffmpeg_interrupt_cb(void *ctx) {
             ret = av_read_frame(pFormatContext, packet);
             
             if (ret == AVERROR_EOF) {
-                NSLog(@"FFmpeg## readFrame EOF");
+                [self logToFile:[NSString stringWithFormat:@"FFmpeg## readFrame EOF"]];
                 [self stopDecoding];
                 if (currentState != 6) { [self sendCurrentState:6]; }
             }
         } @catch (NSException *exception) {
-            NSLog(@"FFmpeg## av_read_frame error: %@", exception);
+            [self logToFile:[NSString stringWithFormat:@"FFmpeg## av_read_frame error: %@", exception]];
             if (currentState != 7) { [self sendCurrentState:7]; }
         }
     }
@@ -317,7 +378,7 @@ static int ffmpeg_interrupt_cb(void *ctx) {
         @try {
             ret = avcodec_send_packet(ctx, packet);
         } @catch (NSException *exception) {
-            NSLog(@"FFmpeg## avcodec_send_packet error");
+            [self logToFile:[NSString stringWithFormat:@"FFmpeg## avcodec_send_packet error"]];
             if (currentState != 7) { [self sendCurrentState:7]; }
         }
     }
@@ -331,7 +392,7 @@ static int ffmpeg_interrupt_cb(void *ctx) {
         @try {
             ret = avcodec_receive_frame(ctx, frame);
         } @catch (NSException *exception) {
-            NSLog(@"FFmpeg## avcodec_receive_frame error");
+            [self logToFile:[NSString stringWithFormat:@"FFmpeg## avcodec_receive_frame error"]];
             if (currentState != 7) { [self sendCurrentState:7]; }
         }
     }
@@ -346,14 +407,14 @@ static int ffmpeg_interrupt_cb(void *ctx) {
         isPlaying = YES;
         ret = av_read_play(pFormatContext);
         if (ret < 0) {
-            NSLog(@"FFmpeg## av_read_play error %d, errno? [%d]", ret, errno);
+            [self logToFile:[NSString stringWithFormat:@"FFmpeg## av_read_play error %d, errno? [%d]", ret, errno]];
             if (currentState != 7) { [self sendCurrentState:7]; }
         } else {
-            NSLog(@"FFmpeg## av_read_play: %d", ret);
+            [self logToFile:[NSString stringWithFormat:@"FFmpeg## av_read_play: %d", ret]];
             if (currentState != 4) { [self sendCurrentState:4]; }
         }
     } @catch (NSException *exception) {
-        NSLog(@"FFmpeg## av_read_play error %@", exception);
+        [self logToFile:[NSString stringWithFormat:@"FFmpeg## av_read_play error %@", exception]];
         if (currentState != 7) { [self sendCurrentState:7]; }
     }
     
@@ -368,14 +429,14 @@ static int ffmpeg_interrupt_cb(void *ctx) {
         isPlaying = NO;
         ret = av_read_pause(pFormatContext);
         if (ret < 0) {
-            NSLog(@"FFmpeg## av_read_pause error %d, errno? [%d]", ret, errno);
+            [self logToFile:[NSString stringWithFormat:@"FFmpeg## av_read_pause error %d, errno? [%d]", ret, errno]];
             if (currentState != 7) { [self sendCurrentState:7]; }
         } else {
-            NSLog(@"FFmpeg## av_read_pause: %d", ret);
+            [self logToFile:[NSString stringWithFormat:@"FFmpeg## av_read_pause: %d", ret]];
             if (currentState != 5) { [self sendCurrentState:5]; }
         }
     } @catch (NSException *exception) {
-        NSLog(@"FFmpeg## av_read_pause error %@", exception);
+        [self logToFile:[NSString stringWithFormat:@"FFmpeg## av_read_pause error %@", exception]];
         if (currentState != 7) { [self sendCurrentState:7]; }
     }
     
