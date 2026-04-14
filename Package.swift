@@ -2,7 +2,6 @@
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
-import Foundation
 
 let package = Package(
     name: "FFmpegDecoder",
@@ -16,38 +15,41 @@ let package = Package(
         )
     ],
     targets: [
-        // FFmpeg C 헤더 target
+        // FFmpeg 바이너리 타겟
+        .binaryTarget(name: "libavcodec",    path: "libs/libavcodec.xcframework"),
+        .binaryTarget(name: "libavfilter",   path: "libs/libavfilter.xcframework"),
+        .binaryTarget(name: "libavformat",   path: "libs/libavformat.xcframework"),
+        .binaryTarget(name: "libavutil",     path: "libs/libavutil.xcframework"),
+        .binaryTarget(name: "libswresample", path: "libs/libswresample.xcframework"),
+        .binaryTarget(name: "libswscale",    path: "libs/libswscale.xcframework"),
+
+        // FFmpeg 헤더 타겟
         .target(
             name: "FFmpegHeaders",
             path: "Sources/FFmpegHeaders",
             publicHeadersPath: "."
         ),
-        // ObjC FFmpegDecoder target
+
+        // ObjC FFmpegDecoder 타겟
         .target(
             name: "FFmpegDecoder",
-            dependencies: ["FFmpegHeaders"],
+            dependencies: [
+                "FFmpegHeaders",
+                "libavcodec", "libavfilter", "libavformat",
+                "libavutil", "libswresample", "libswscale"
+            ],
             path: "Sources/FFmpegDecoder",
             publicHeadersPath: ".",
             cSettings: [
-                .headerSearchPath("../FFmpegHeaders") // 헤더 참조
+                .headerSearchPath("../FFmpegHeaders")
             ],
             linkerSettings: [
-                // 필수 시스템 라이브러리
+                // 시스템 라이브러리 (unsafeFlags 없이 가능)
                 .linkedLibrary("z"),
                 .linkedLibrary("bz2"),
                 .linkedLibrary("iconv"),
                 .linkedLibrary("lzma"),
-                .linkedLibrary("resolv"),
-                // FFmpeg 정적 라이브러리
-                .unsafeFlags([
-                    "-L\((#filePath as NSString).deletingLastPathComponent)/libs",
-                    "-lavcodec",
-                    "-lavfilter",
-                    "-lavformat",
-                    "-lavutil",
-                    "-lswresample",
-                    "-lswscale"
-                ])
+                .linkedLibrary("resolv")
             ]
         )
     ]
