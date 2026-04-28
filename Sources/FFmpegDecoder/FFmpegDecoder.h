@@ -27,6 +27,7 @@
 - (void) stopDecoding;
 - (void) pause;
 - (void) resume;
+- (void) seek:(double)seconds;
 - (BOOL) isPlaying;
 
 - (void) logToFile:(NSString *)text;

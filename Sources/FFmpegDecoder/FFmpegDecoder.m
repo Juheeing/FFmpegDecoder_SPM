@@ -18,7 +18,10 @@ static __weak FFmpegDecoder *gCurrentDecoder = nil;
     int dst_linesize[4];
     int vidx, aidx;
     BOOL decodingStopped;
-    BOOL isPaused, isPlaying;
+    BOOL isPaused, isPlaying, isSeeking;
+    double seekTarget;
+    BOOL hasPendingSeek;         // seek 직후 첫 프레임에서 보정할 플래그
+    double pendingSeekSeconds;   // 사용자가 요청한 seek 시간
     BOOL needLog;
     NSCondition *pauseCondition;
     int64_t lastRescaledPTS;      // 이전 프레임 pts (rescaled)
@@ -36,6 +39,8 @@ static __weak FFmpegDecoder *gCurrentDecoder = nil;
         lastRescaledPTS = -1;
         ptsOffset = 0;
         currentState = 0;
+        hasPendingSeek = NO;
+        pendingSeekSeconds = 0;
         needLog = NO;
     }
     return self;
@@ -153,6 +158,17 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
     dispatch_async(mDecodingQueue, ^{
         [self->pauseCondition lock];
         self->isPaused = NO;
+        [self->pauseCondition signal];
+        [self->pauseCondition unlock];
+    });
+}
+
+- (void)seek:(double)seconds {
+    dispatch_async(mDecodingQueue, ^{
+        NSLog(@"FFmpeg## isSeeking");
+        [self->pauseCondition lock];
+        self->seekTarget = seconds;
+        self->isSeeking = YES;
         [self->pauseCondition signal];
         [self->pauseCondition unlock];
     });
@@ -312,6 +328,11 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
                 if (_player.isPlaying) {
                     [_player pause];
                 }
+                if (self->isSeeking) {
+                    NSLog(@"FFmpeg## readSeek");
+                    self->isSeeking = NO;
+                    [self readSeek:seekTarget];
+                }
                 [self->pauseCondition wait];
             }
             [self->pauseCondition unlock];
@@ -436,30 +457,81 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
     return ret;
 }
 
-- (void)getCurrentTime:(AVFrame *)frame stream:(AVStream *)stream {
-    if (!frame || !stream) return;
-    if (!frame->pkt_dts && !frame->pts) return;
+- (int)readSeek:(double)seconds {
+    int ret = -1;
 
-    // PTS 기준값
-    int64_t pts = (frame->pts == AV_NOPTS_VALUE) ? frame->pkt_dts : frame->pts;
-    if (pts == AV_NOPTS_VALUE) return;
+    @try {
+        if (seconds < 0 || !pFormatContext) {
+            NSLog(@"FFmpeg## Invalid seek time or context is NULL");
+            if (currentState != 7) { [self sendCurrentState:7]; }
+            return -1;
+        }
 
-    // stream time_base → ms 로 변환
-    int64_t currentTime = av_rescale_q(pts, stream->time_base, (AVRational){1, 1000});
+        lastRescaledPTS = -1;
+        ptsOffset = 0;
+        hasPendingSeek = YES;
+        pendingSeekSeconds = seconds;
+        
+        int64_t timestamp = (int64_t)(seconds * AV_TIME_BASE);
 
-    int64_t duration = 0;
-    
-    if (pFormatContext && pFormatContext->duration > 0) {
-        duration = av_rescale_q(pFormatContext->duration, AV_TIME_BASE_Q, (AVRational){1, 1000});
+        // 디코더 상태 초기화
+        avcodec_flush_buffers(pVCtx);
+        avcodec_flush_buffers(pACtx);
+
+        // seek 수행
+        ret = av_seek_frame(pFormatContext, -1, timestamp, AVSEEK_FLAG_BACKWARD | AVSEEK_FLAG_ANY);
+
+        NSLog(@"FFmpeg## av_seek_frame to %.2f sec (ts: %lld): %d", seconds, timestamp, ret);
+
+        if (ret < 0) {
+            NSLog(@"FFmpeg## Seek failed");
+            if (currentState != 7) { [self sendCurrentState:7]; }
+            hasPendingSeek = NO;
+        } else {
+            dispatch_sync(dispatch_get_main_queue(), ^{
+                [self->_delegate receivedSeekingState:YES];
+            });
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"FFmpeg## av_seek_frame exception: %@", exception);
+        if (currentState != 7) { [self sendCurrentState:7]; }
+        ret = -1;
+        hasPendingSeek = NO;
     }
 
-    //NSLog(@"FFmpeg## currentTime %lld, duration %lld", currentTime, duration);
+    return ret;
+}
+
+- (void)getCurrentTime:(AVFrame *)frame stream:(AVStream *)stream {
+    if (!frame || !stream) return;
     
-    currentTime = currentTime / 1000;
-    duration = duration / 1000;
-    
+    int64_t currentTime = 0;
+    int64_t totalDuration = pFormatContext->duration / AV_TIME_BASE;
+
+    int64_t raw_pts = (frame->pts != AV_NOPTS_VALUE) ? frame->pts : frame->best_effort_timestamp;
+    if (raw_pts == AV_NOPTS_VALUE) {
+        currentTime = (lastRescaledPTS != -1) ? (lastRescaledPTS + ptsOffset) : 0;
+    } else {
+        int64_t rescaled_pts = av_rescale_q(raw_pts, stream->time_base, (AVRational){1, 1});
+
+        if (hasPendingSeek) {
+            // seek 직후 첫 프레임: 요청한 초에 맞추기 위한 offset 계산
+            ptsOffset = (int64_t)pendingSeekSeconds - rescaled_pts;
+            lastRescaledPTS = rescaled_pts;
+            hasPendingSeek = NO;
+        } else {
+            // 일반적인 discontinuity 처리
+            if (lastRescaledPTS != -1 && rescaled_pts < lastRescaledPTS) {
+                ptsOffset += lastRescaledPTS;
+            }
+            lastRescaledPTS = rescaled_pts;
+        }
+
+        currentTime = rescaled_pts + ptsOffset;
+    }
+
     dispatch_sync(dispatch_get_main_queue(), ^{
-        [self->_delegate receivedCurrentTime:currentTime duration:duration];
+        [self->_delegate receivedCurrentTime:currentTime duration:totalDuration];
     });
 }
 
