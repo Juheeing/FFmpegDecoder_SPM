@@ -1,5 +1,5 @@
 #import "FFmpegDecoder.h"
-#define FFMPEG_DECODER_VERSION @"1.0.2"
+#define FFMPEG_DECODER_VERSION @"1.0.4"
 
 static __weak FFmpegDecoder *gCurrentDecoder = nil;
 
@@ -22,7 +22,7 @@ static __weak FFmpegDecoder *gCurrentDecoder = nil;
     double seekTarget;
     BOOL hasPendingSeek;         // seek 직후 첫 프레임에서 보정할 플래그
     double pendingSeekSeconds;   // 사용자가 요청한 seek 시간
-    BOOL needLog;
+    BOOL needLog, needInterrupt;
     NSCondition *pauseCondition;
     int64_t lastRescaledPTS;      // 이전 프레임 pts (rescaled)
     int64_t ptsOffset;           // 누적 offset
@@ -124,10 +124,12 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
     }
 }
 
-- (void)startStreaming:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options needLog:(BOOL)needLog {
+- (void)startStreaming:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options
+               needLog:(BOOL)needLog needInterrupt:(BOOL)needInterrupt {
     gCurrentDecoder = self;
     self->decodingStopped = NO;
     self->needLog = needLog;
+    self->needInterrupt = needInterrupt;
     dispatch_async(mDecodingQueue, ^{
         [self openFile:url withOptions:options];
     });
@@ -189,9 +191,10 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
     av_log_set_level(AV_LOG_DEBUG);
     avformat_network_init();
     pFormatContext = avformat_alloc_context();
-    pFormatContext->interrupt_callback.callback = ffmpeg_interrupt_cb;
-    pFormatContext->interrupt_callback.opaque = (__bridge void *)self;
-    
+    if (needInterrupt) {
+        pFormatContext->interrupt_callback.callback = ffmpeg_interrupt_cb;
+        pFormatContext->interrupt_callback.opaque = (__bridge void *)self;
+    }
     AVDictionary *opts = 0;
     
     for (NSString *key in options) {

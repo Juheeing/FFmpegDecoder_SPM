@@ -23,7 +23,8 @@
 @property (nonatomic, strong)AVAudioPlayerNode *player;
 
 
-- (void)startStreaming:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options needLog:(BOOL)needLog;
+- (void)startStreaming:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options
+               needLog:(BOOL)needLog needInterrupt:(BOOL)needInterrupt;
 - (void) stopDecoding;
 - (void) pause;
 - (void) resume;
