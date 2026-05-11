@@ -8,9 +8,21 @@
 
 @protocol DecoderDelegate <NSObject>
 
-- (void)receivedDecodedCIImage:(CIImage *)ciImage;
+typedef NS_ENUM(NSInteger, PlayerState) {
+    PlayerStateInitialized     = 0,
+    PlayerStatePreparing       = 1,
+    PlayerStateReadyToPlay     = 2,
+    PlayerStateBuffering       = 3,
+    PlayerStateBufferFinished  = 4,
+    PlayerStatePaused          = 5,
+    PlayerStatePlayedToTheEnd  = 6,
+    PlayerStateError           = 7,
+    PlayerStateStop            = 8
+};
+
+- (void) receivedDecodedCIImage:(CIImage *)ciImage;
 - (void) receivedCurrentTime:(int64_t)currentTime duration:(int64_t)duration;
-- (void) receivedState:(int64_t)state; // 0: initialized, 1: preparing, 2: readyToPlay, 3: buffering, 4: bufferFinished, 5: paused, 6: playedToTheEnd, 7: error, 8: stop
+- (void) receivedState:(PlayerState)state; // 0: initialized, 1: preparing, 2: readyToPlay, 3: buffering, 4: bufferFinished, 5: paused, 6: playedToTheEnd, 7: error, 8: stop
 - (void) receivedSeekingState:(BOOL)success;
 - (void) receivedVideoSize:(CGSize)videoSize;
 

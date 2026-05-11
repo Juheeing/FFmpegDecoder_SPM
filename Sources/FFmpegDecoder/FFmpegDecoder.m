@@ -1,5 +1,5 @@
 #import "FFmpegDecoder.h"
-#define FFMPEG_DECODER_VERSION @"1.0.4"
+#define FFMPEG_DECODER_VERSION @"1.0.5"
 
 static __weak FFmpegDecoder *gCurrentDecoder = nil;
 
@@ -176,7 +176,7 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
     });
 }
 
-- (void)sendCurrentState:(int)state {
+- (void)sendCurrentState:(PlayerState)state {
     dispatch_sync(dispatch_get_main_queue(), ^{
         [self->_delegate receivedState:state];
     });
