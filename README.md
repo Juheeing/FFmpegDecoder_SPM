@@ -55,3 +55,65 @@ From the FFmpeg source root:
 
 ```bash
 patch -p1 < tcp_ipv4_literal_fastpath.patch
+```
+
+---
+
+# Installation
+
+## Swift Package Manager
+
+```swift
+dependencies: [
+    .package(url: "https://bitbucket.org/tw-itdev/ffmpeg-decoder.git", .exact: "x.x.x")
+]
+```
+
+## Manual
+
+### 1. Add import
+
+```swift
+import FFmpegDecoder
+```
+
+### 2. Add delegate
+
+```swift
+@objc
+protocol PlayerDelegate: AnyObject {
+    @objc optional func playerController(state: PlayerState)
+    @objc optional func playerController(currentTime: String, totalTime: String)
+    @objc optional func playerController(videoSize: CGSize)
+    @objc optional func playerController(finish error: Error?)
+    @objc optional func playerController(seek: TimeInterval)
+    @objc optional func playerController(progress: Float)
+}
+```
+
+```swift
+func receivedDecodedCIImage(_ ciImage: CIImage!) {
+    // Receives decoded frame data as a CIImage and renders it to the UIImageView on the main thread.
+}
+
+func receivedCurrentTime(_ currentTime: Int64, duration: Int64) {
+    // Receives current playback position and total duration in seconds, then forwards them to PlayerDelegate as formatted time strings.
+}
+
+func receivedSeekingState(_ success: Bool) {
+    // Indicates whether a seek operation succeeded.
+}
+
+func receivedState(_ state: PlayerState) {
+    // Receives the current playback state from the decoder and forwards it to PlayerDelegate.
+}
+
+func receivedVideoSize(_ videoSize: CGSize) {
+    // Receives the video's resolution as a CGSize from the decoder.
+}
+```
+
+## Delegates
+
+- **`PlayerDelegate`** — An output delegate through which `PlayerUIView` propagates events to external consumers such as a UI layer or `ViewController`.
+- **`DecoderDelegate`** — An input delegate through which `FFmpegDecoder` delivers decoded results into `PlayerUIView` internally.
