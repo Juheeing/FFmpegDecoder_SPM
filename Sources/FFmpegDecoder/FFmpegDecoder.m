@@ -1,5 +1,5 @@
 #import "FFmpegDecoder.h"
-#define FFMPEG_DECODER_VERSION @"1.0.5"
+#define FFMPEG_DECODER_VERSION @"1.0.6"
 
 static __weak FFmpegDecoder *gCurrentDecoder = nil;
 
@@ -20,7 +20,7 @@ static __weak FFmpegDecoder *gCurrentDecoder = nil;
     BOOL decodingStopped;
     BOOL isPaused, isPlaying, isSeeking;
     double seekTarget;
-    BOOL hasPendingSeek;         // seek 직후 첫 프레임에서 보정할 플래그
+    BOOL hasPendingSeek, hasEverSeeked;         // seek 직후 첫 프레임에서 보정할 플래그
     double pendingSeekSeconds;   // 사용자가 요청한 seek 시간
     BOOL needLog, needInterrupt;
     NSCondition *pauseCondition;
@@ -40,6 +40,7 @@ static __weak FFmpegDecoder *gCurrentDecoder = nil;
         ptsOffset = 0;
         currentState = 0;
         hasPendingSeek = NO;
+        hasEverSeeked = NO;
         pendingSeekSeconds = 0;
         needLog = NO;
     }
@@ -54,6 +55,7 @@ static __weak FFmpegDecoder *gCurrentDecoder = nil;
 }
 
 - (void) clear {
+    [self logToFile:@"FFmpeg## clear"];
     if (vFrame) { av_frame_free(&vFrame); av_frame_unref(vFrame); vFrame = NULL; }
     if (aFrame) { av_frame_free(&aFrame); av_frame_unref(aFrame); aFrame = NULL; }
     if (pVCtx) { avcodec_close(pVCtx); avcodec_free_context(&pVCtx); pVCtx = NULL; }
@@ -167,7 +169,7 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
 
 - (void)seek:(double)seconds {
     dispatch_async(mDecodingQueue, ^{
-        NSLog(@"FFmpeg## isSeeking");
+        [self logToFile:@"FFmpeg## isSeeking"];
         [self->pauseCondition lock];
         self->seekTarget = seconds;
         self->isSeeking = YES;
@@ -177,7 +179,7 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
 }
 
 - (void)sendCurrentState:(PlayerState)state {
-    dispatch_sync(dispatch_get_main_queue(), ^{
+    dispatch_async(dispatch_get_main_queue(), ^{
         [self->_delegate receivedState:state];
     });
 }
@@ -332,7 +334,7 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
                     [_player pause];
                 }
                 if (self->isSeeking) {
-                    NSLog(@"FFmpeg## readSeek");
+                    [self logToFile:@"FFmpeg## readSeek"];
                     self->isSeeking = NO;
                     [self readSeek:seekTarget];
                 }
@@ -465,7 +467,7 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
 
     @try {
         if (seconds < 0 || !pFormatContext) {
-            NSLog(@"FFmpeg## Invalid seek time or context is NULL");
+            [self logToFile:@"FFmpeg## Invalid seek time or context is NULL"];
             if (currentState != 7) { [self sendCurrentState:7]; }
             return -1;
         }
@@ -483,20 +485,20 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
 
         // seek 수행
         ret = av_seek_frame(pFormatContext, -1, timestamp, AVSEEK_FLAG_BACKWARD | AVSEEK_FLAG_ANY);
-
-        NSLog(@"FFmpeg## av_seek_frame to %.2f sec (ts: %lld): %d", seconds, timestamp, ret);
+        [self logToFile:[NSString stringWithFormat:@"FFmpeg## av_seek_frame to %.2f sec (ts: %lld): %d", seconds, timestamp, ret]];
 
         if (ret < 0) {
-            NSLog(@"FFmpeg## Seek failed");
+            [self logToFile:@"FFmpeg## Seek failed"];
             if (currentState != 7) { [self sendCurrentState:7]; }
             hasPendingSeek = NO;
         } else {
+            hasEverSeeked = YES;
             dispatch_sync(dispatch_get_main_queue(), ^{
                 [self->_delegate receivedSeekingState:YES];
             });
         }
     } @catch (NSException *exception) {
-        NSLog(@"FFmpeg## av_seek_frame exception: %@", exception);
+        [self logToFile:[NSString stringWithFormat:@"FFmpeg## av_seek_frame exception: %@", exception]];
         if (currentState != 7) { [self sendCurrentState:7]; }
         ret = -1;
         hasPendingSeek = NO;
@@ -507,38 +509,62 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
 
 - (void)getCurrentTime:(AVFrame *)frame stream:(AVStream *)stream {
     if (!frame || !stream) return;
-    
-    int64_t currentTime = 0;
-    int64_t totalDuration = pFormatContext->duration / AV_TIME_BASE;
 
-    int64_t raw_pts = (frame->pts != AV_NOPTS_VALUE) ? frame->pts : frame->best_effort_timestamp;
-    if (raw_pts == AV_NOPTS_VALUE) {
-        currentTime = (lastRescaledPTS != -1) ? (lastRescaledPTS + ptsOffset) : 0;
-    } else {
-        int64_t rescaled_pts = av_rescale_q(raw_pts, stream->time_base, (AVRational){1, 1});
+    if (self->hasEverSeeked) {
+        // seek 이후: PTS discontinuity 보정 로직 사용
+        int64_t currentTime = 0;
+        int64_t totalDuration = pFormatContext->duration / AV_TIME_BASE;
 
-        if (hasPendingSeek) {
-            // seek 직후 첫 프레임: 요청한 초에 맞추기 위한 offset 계산
-            ptsOffset = (int64_t)pendingSeekSeconds - rescaled_pts;
-            lastRescaledPTS = rescaled_pts;
-            hasPendingSeek = NO;
+        int64_t raw_pts = (frame->pts != AV_NOPTS_VALUE) ? frame->pts : frame->best_effort_timestamp;
+        if (raw_pts == AV_NOPTS_VALUE) {
+            currentTime = (lastRescaledPTS != -1) ? (lastRescaledPTS + ptsOffset) : 0;
         } else {
-            // 일반적인 discontinuity 처리
-            if (lastRescaledPTS != -1 && rescaled_pts < lastRescaledPTS) {
-                ptsOffset += lastRescaledPTS;
+            int64_t rescaled_pts = av_rescale_q(raw_pts, stream->time_base, (AVRational){1, 1});
+
+            if (hasPendingSeek) {
+                ptsOffset = (int64_t)pendingSeekSeconds - rescaled_pts;
+                lastRescaledPTS = rescaled_pts;
+                hasPendingSeek = NO;
+            } else {
+                if (lastRescaledPTS != -1 && rescaled_pts < lastRescaledPTS) {
+                    ptsOffset += lastRescaledPTS;
+                }
+                lastRescaledPTS = rescaled_pts;
             }
-            lastRescaledPTS = rescaled_pts;
+
+            currentTime = rescaled_pts + ptsOffset;
         }
 
-        currentTime = rescaled_pts + ptsOffset;
-    }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self->_delegate receivedCurrentTime:currentTime duration:totalDuration];
+        });
 
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        [self->_delegate receivedCurrentTime:currentTime duration:totalDuration];
-    });
+    } else {
+        // seek 전: 단순 ms 변환 로직 사용
+        if (!frame->pkt_dts && !frame->pts) return;
+
+        int64_t pts = (frame->pts == AV_NOPTS_VALUE) ? frame->pkt_dts : frame->pts;
+        if (pts == AV_NOPTS_VALUE) return;
+
+        int64_t currentTime = av_rescale_q(pts, stream->time_base, (AVRational){1, 1000});
+
+        int64_t duration = 0;
+        if (pFormatContext && pFormatContext->duration > 0) {
+            duration = av_rescale_q(pFormatContext->duration, AV_TIME_BASE_Q, (AVRational){1, 1000});
+        }
+
+        currentTime = currentTime / 1000;
+        duration = duration / 1000;
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self->_delegate receivedCurrentTime:currentTime duration:duration];
+        });
+    }
 }
 
 - (void)drawImage {
+    if (self->decodingStopped) return;
+    
     int width = vFrame->width;
     int height = vFrame->height;
 
@@ -571,22 +597,25 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
               dst_data,
               dst_linesize);
 
-    // 3️⃣ CIImage 생성
-    CIImage *ciImage = [CIImage imageWithBitmapData:[NSData dataWithBytesNoCopy:dst_data[0]
-                                                                         length:dst_linesize[0]*height
-                                                                   freeWhenDone:NO]
-                                      bytesPerRow:dst_linesize[0]
-                                            size:CGSizeMake(width, height)
-                                          format:kCIFormatRGBA8
-                                      colorSpace:CGColorSpaceCreateDeviceRGB()];
-
-    dispatch_sync(dispatch_get_main_queue(), ^{
+    NSData *imageData = [NSData dataWithBytes:dst_data[0] length:dst_linesize[0] * height];
+    
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self->decodingStopped) return;
+        
+        // 3️⃣ CIImage 생성
+        CIImage *ciImage = [CIImage imageWithBitmapData:imageData
+                                            bytesPerRow:dst_linesize[0]
+                                                  size:CGSizeMake(width, height)
+                                                format:kCIFormatRGBA8
+                                            colorSpace:CGColorSpaceCreateDeviceRGB()];
         [self->_delegate receivedDecodedCIImage:ciImage];
     });
 }
 
 
 - (void) drawAudio {
+    if (self->decodingStopped) return;
+    
     AVAudioChannelLayout *channelLayout = [[AVAudioChannelLayout alloc] initWithLayoutTag:kAudioChannelLayoutTag_Stereo];
     AVAudioFormat *format = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
                                                              sampleRate:aFrame->sample_rate
