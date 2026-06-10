@@ -1,5 +1,4 @@
 // swift-tools-version: 6.1
-// The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
 
@@ -30,29 +29,40 @@ let package = Package(
             publicHeadersPath: "."
         ),
 
-        // ObjC FFmpegDecoder 타겟
+        // ObjC 브릿지 타겟 (va_list 로그 콜백 등 Swift에서 구현 불가한 C 코드)
         .target(
-            name: "FFmpegDecoder",
+            name: "FFmpegCBridge",
             dependencies: [
                 "FFmpegHeaders",
                 "libavcodec", "libavfilter", "libavformat",
                 "libavutil", "libswresample", "libswscale"
             ],
-            path: "Sources/FFmpegDecoder",
+            path: "Sources/FFmpegCBridge",
             publicHeadersPath: ".",
             cSettings: [
                 .headerSearchPath("../FFmpegHeaders")
-            ],
-            linkerSettings: [
-                // 시스템 라이브러리 (unsafeFlags 없이 가능)
-                .linkedLibrary("z"),
-                .linkedLibrary("bz2"),
-                .linkedLibrary("iconv"),
-                .linkedLibrary("lzma"),
-                .linkedLibrary("resolv")
             ]
+        ),
+
+        // Swift FFmpegDecoder 타겟
+        .target(
+            name: "FFmpegDecoder",
+            dependencies: [
+                "FFmpegHeaders",
+                "FFmpegCBridge",
+                "libavcodec", "libavfilter", "libavformat",
+                "libavutil", "libswresample", "libswscale"
+            ],
+            path: "Sources/FFmpegDecoder",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+
+        // 테스트 타겟
+        .testTarget(
+            name: "FFmpegDecoderTests",
+            dependencies: ["FFmpegDecoder"]
         )
     ]
 )
-
-

@@ -1,0 +1,14 @@
+module FFmpegHeaders {
+    header "libavformat/avformat.h"
+    header "libavutil/imgutils.h"
+    header "libavutil/mathematics.h"
+    header "libavutil/channel_layout.h"
+    header "libavutil/samplefmt.h"
+    header "libavutil/log.h"
+    header "libavutil/mem.h"
+    header "libavutil/dict.h"
+    header "libavcodec/avcodec.h"
+    header "libswscale/swscale.h"
+    header "libswresample/swresample.h"
+    export *
+}
