@@ -110,12 +110,13 @@ private let ffmpegInterruptCB: @convention(c) (UnsafeMutableRawPointer?) -> Int3
 
     @objc public func stopDecoding() {
         log("FFmpeg## stopDecoding")
-        if currentState != 0 { sendState(.stop) }
         pauseCondition.lock()
+        let shouldNotify = !decodingStopped && currentState != 0
         decodingStopped = true
         gDecoderStopped = true
         pauseCondition.signal()
         pauseCondition.unlock()
+        if shouldNotify { sendState(.stop) }
     }
 
     @objc public func pause() {
