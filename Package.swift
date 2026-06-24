@@ -16,7 +16,6 @@ let package = Package(
     targets: [
         // FFmpeg 바이너리 타겟
         .binaryTarget(name: "libavcodec",    path: "libs/libavcodec.xcframework"),
-        .binaryTarget(name: "libavfilter",   path: "libs/libavfilter.xcframework"),
         .binaryTarget(name: "libavformat",   path: "libs/libavformat.xcframework"),
         .binaryTarget(name: "libavutil",     path: "libs/libavutil.xcframework"),
         .binaryTarget(name: "libswresample", path: "libs/libswresample.xcframework"),
@@ -34,7 +33,7 @@ let package = Package(
             name: "FFmpegCBridge",
             dependencies: [
                 "FFmpegHeaders",
-                "libavcodec", "libavfilter", "libavformat",
+                "libavcodec", "libavformat",
                 "libavutil", "libswresample", "libswscale"
             ],
             path: "Sources/FFmpegCBridge",
@@ -50,7 +49,7 @@ let package = Package(
             dependencies: [
                 "FFmpegHeaders",
                 "FFmpegCBridge",
-                "libavcodec", "libavfilter", "libavformat",
+                "libavcodec", "libavformat",
                 "libavutil", "libswresample", "libswscale"
             ],
             path: "Sources/FFmpegDecoder",
