@@ -27,16 +27,6 @@ import FFmpegCBridge
     func receivedVideoSize(_ videoSize: CGSize)
 }
 
-// MARK: - File-level globals for C callbacks
-
-// Single global used by the @convention(c) interrupt callback below.
-// Multi-instance limitation: same as the original ObjC gCurrentDecoder pattern.
-private var gDecoderStopped: Bool = false
-
-private let ffmpegInterruptCB: @convention(c) (UnsafeMutableRawPointer?) -> Int32 = { _ in
-    return gDecoderStopped ? 1 : 0
-}
-
 // MARK: - FFmpegDecoder
 
 @objc public final class FFmpegDecoder: NSObject {
@@ -66,6 +56,10 @@ private let ffmpegInterruptCB: @convention(c) (UnsafeMutableRawPointer?) -> Int3
     private var vidx: Int32 = -1
     private var aidx: Int32 = -1
 
+    // Per-instance interrupt flag — heap-allocated so its address stays stable across calls
+    // and is not shared between decoder instances (unlike a file-level global).
+    private let stoppedFlag = UnsafeMutablePointer<CBool>.allocate(capacity: 1)
+
     // Playback state
     private var decodingStopped = false
     private var isPaused = false
@@ -85,12 +79,14 @@ private let ffmpegInterruptCB: @convention(c) (UnsafeMutableRawPointer?) -> Int3
     private let decodingQueue = DispatchQueue.global(qos: .default)
 
     @objc public override init() {
+        stoppedFlag.initialize(to: false)
         super.init()
     }
 
     deinit {
         stopDecoding()
         clearResources()
+        stoppedFlag.deallocate()
     }
 
     // MARK: - Public API
@@ -99,7 +95,7 @@ private let ffmpegInterruptCB: @convention(c) (UnsafeMutableRawPointer?) -> Int3
                                      withOptions options: [String: String],
                                      needLog: Bool,
                                      needInterrupt: Bool) {
-        gDecoderStopped = false
+        stoppedFlag.pointee = false
         decodingStopped = false
         self.needLog = needLog
         self.needInterrupt = needInterrupt
@@ -113,7 +109,7 @@ private let ffmpegInterruptCB: @convention(c) (UnsafeMutableRawPointer?) -> Int3
         pauseCondition.lock()
         let shouldNotify = !decodingStopped && currentState != 0
         decodingStopped = true
-        gDecoderStopped = true
+        stoppedFlag.pointee = true
         pauseCondition.signal()
         pauseCondition.unlock()
         if shouldNotify { sendState(.stop) }
@@ -198,8 +194,8 @@ private let ffmpegInterruptCB: @convention(c) (UnsafeMutableRawPointer?) -> Int3
 
         pFormatContext = avformat_alloc_context()
         if needInterrupt {
-            pFormatContext?.pointee.interrupt_callback.callback = ffmpegInterruptCB
-            pFormatContext?.pointee.interrupt_callback.opaque = nil
+            pFormatContext?.pointee.interrupt_callback.callback = ffmpeg_interrupt_check
+            pFormatContext?.pointee.interrupt_callback.opaque = UnsafeMutableRawPointer(stoppedFlag)
         }
 
         var opts: OpaquePointer? = nil
@@ -245,8 +241,8 @@ private let ffmpegInterruptCB: @convention(c) (UnsafeMutableRawPointer?) -> Int3
             log("FFmpeg## Retrying find_stream_info (\(i + 1)/\(maxRetry))...")
             avformat_close_input(&pFormatContext)
             pFormatContext = avformat_alloc_context()
-            pFormatContext?.pointee.interrupt_callback.callback = ffmpegInterruptCB
-            pFormatContext?.pointee.interrupt_callback.opaque = nil
+            pFormatContext?.pointee.interrupt_callback.callback = ffmpeg_interrupt_check
+            pFormatContext?.pointee.interrupt_callback.opaque = UnsafeMutableRawPointer(stoppedFlag)
 
             ret = url.withCString { avformat_open_input(&pFormatContext, $0, nil, &opts) }
             if ret != 0 { break }

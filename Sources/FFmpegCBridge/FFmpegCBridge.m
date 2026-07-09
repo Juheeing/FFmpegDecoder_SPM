@@ -20,3 +20,9 @@ void ffmpeg_setup_log_callback(void) {
 void ffmpeg_remove_log_callback(void) {
     av_log_set_callback(av_log_default_callback);
 }
+
+int ffmpeg_interrupt_check(void *opaque) {
+    if (!opaque) return 0;
+    _Bool *stopped = (_Bool *)opaque;
+    return *stopped ? 1 : 0;
+}
