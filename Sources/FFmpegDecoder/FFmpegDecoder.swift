@@ -341,6 +341,9 @@ import FFmpegCBridge
                 if !isPlayingInternal {
                     _ = readPlay()
                     if currentState != 2 { sendState(.readyToPlay) }
+                    // resume 후 코덱 내부 상태 초기화 — pause 중 잘린 AAC 비트스트림으로 인한 디코딩 오류 방지
+                    avcodec_flush_buffers(pACtx)
+                    avcodec_flush_buffers(pVCtx)
                 }
 
                 guard let pkt = packet else { continue }
@@ -353,9 +356,15 @@ import FFmpegCBridge
                     }
                 }
                 if pkt.pointee.stream_index == aidx, let aCtx = pACtx, let aF = aFrame {
-                    if avcodec_send_packet(aCtx, pkt) >= 0,
-                       avcodec_receive_frame(aCtx, aF) >= 0 {
-                        drawAudio()
+                    let sendRet = avcodec_send_packet(aCtx, pkt)
+                    if sendRet >= 0 {
+                        if avcodec_receive_frame(aCtx, aF) >= 0 {
+                            drawAudio()
+                        }
+                    } else {
+                        // 손상된 AAC 패킷으로 코덱 상태가 깨진 경우 즉시 플러시해서 회복
+                        log("FFmpeg## audio send_packet failed: \(sendRet), flushing codec")
+                        avcodec_flush_buffers(aCtx)
                     }
                 }
                 av_packet_unref(pkt)
@@ -568,15 +577,20 @@ import FFmpegCBridge
             let eng = AVAudioEngine()
             let pNode = AVAudioPlayerNode()
             pNode.volume = 1.0
+            engine = eng    // 이전 engine 해제
+            player = pNode
             eng.attach(pNode)
             eng.connect(pNode, to: eng.mainMixerNode, format: format)
-            if !eng.isRunning {
-                eng.prepare()
-                try? eng.start()
+            eng.prepare()
+            do {
+                try eng.start()
+            } catch {
+                log("FFmpeg## AVAudioEngine start failed: \(error)")
+                engine = nil
+                player = nil
+                return
             }
             pNode.play()
-            engine = eng
-            player = pNode
         }
 
         guard let audioData = extractAudioData(from: aF, ctx: aCtx),
