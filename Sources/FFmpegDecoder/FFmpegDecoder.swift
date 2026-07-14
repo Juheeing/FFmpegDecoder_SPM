@@ -76,6 +76,11 @@ import FFmpegCBridge
     private var ptsOffset: Int64 = 0
     private var currentState: Int = 0
 
+    // PTS-based frame timing for non-RTSP sources (file://, http://)
+    private var sourceURL: String = ""
+    private var frameStartWallTime: Double = 0
+    private var frameStartPTS: Double = -1
+
     private let decodingQueue = DispatchQueue.global(qos: .default)
 
     @objc public override init() {
@@ -99,6 +104,9 @@ import FFmpegCBridge
         decodingStopped = false
         self.needLog = needLog
         self.needInterrupt = needInterrupt
+        sourceURL = url
+        frameStartPTS = -1
+        frameStartWallTime = 0
         decodingQueue.async { [weak self] in
             self?.openFile(url, options: options)
         }
@@ -344,6 +352,8 @@ import FFmpegCBridge
                     // resume 후 코덱 내부 상태 초기화 — pause 중 잘린 AAC 비트스트림으로 인한 디코딩 오류 방지
                     avcodec_flush_buffers(pACtx)
                     avcodec_flush_buffers(pVCtx)
+                    // pause 동안 벽시계가 앞서 나갔으므로 타이밍 기준점 리셋
+                    frameStartPTS = -1
                 }
 
                 guard let pkt = packet else { continue }
@@ -351,7 +361,10 @@ import FFmpegCBridge
                 if pkt.pointee.stream_index == vidx, let vCtx = pVCtx, let vF = vFrame {
                     if avcodec_send_packet(vCtx, pkt) >= 0,
                        avcodec_receive_frame(vCtx, vF) >= 0 {
-                        if let vStream = pVStream { getCurrentTime(vF, stream: vStream) }
+                        if let vStream = pVStream {
+                            getCurrentTime(vF, stream: vStream)
+                            throttleVideo(frame: vF, stream: vStream)
+                        }
                         drawImage()
                     }
                 }
@@ -390,6 +403,11 @@ import FFmpegCBridge
     @discardableResult
     private func readPlay() -> Int32 {
         isPlayingInternal = true
+        // av_read_play은 RTSP 등 네트워크 스트림 전용. 로컬 파일은 호출하지 않음.
+        guard sourceURL.hasPrefix("rtsp") else {
+            if currentState != 4 { sendState(.bufferFinished) }
+            return 0
+        }
         let ret = av_read_play(pFormatContext)
         if ret < 0 {
             log("FFmpeg## av_read_play error \(ret)")
@@ -404,6 +422,11 @@ import FFmpegCBridge
     @discardableResult
     private func readPause() -> Int32 {
         isPlayingInternal = false
+        // av_read_pause은 RTSP 등 네트워크 스트림 전용. 로컬 파일은 호출하지 않음.
+        guard sourceURL.hasPrefix("rtsp") else {
+            if currentState != 5 { sendState(.paused) }
+            return 0
+        }
         let ret = av_read_pause(pFormatContext)
         if ret < 0 {
             log("FFmpeg## av_read_pause error \(ret)")
@@ -427,6 +450,7 @@ import FFmpegCBridge
         ptsOffset = 0
         hasPendingSeek = true
         pendingSeekSeconds = seconds
+        frameStartPTS = -1  // seek 후 타이밍 기준점 리셋
 
         let timestamp = Int64(seconds * Double(AV_TIME_BASE))
         avcodec_flush_buffers(pVCtx)
@@ -619,6 +643,37 @@ import FFmpegCBridge
         }
         guard let ptr = firstChannel else { return nil }
         return Data(bytes: ptr, count: dataSize)
+    }
+
+    // MARK: - Private: PTS-based frame timing
+
+    // RTSP 스트림은 네트워크 자체가 패킷 속도를 제한하므로 추가 조절 불필요.
+    // file:// / http:// 는 av_read_frame이 즉시 리턴하기 때문에 PTS를 보고 슬립해야 함.
+    private func throttleVideo(frame: UnsafeMutablePointer<AVFrame>,
+                                stream: UnsafeMutablePointer<AVStream>) {
+        guard !sourceURL.hasPrefix("rtsp") else { return }
+
+        let pts = frame.pointee.best_effort_timestamp != kFFmpegNoPTSValue
+            ? frame.pointee.best_effort_timestamp
+            : frame.pointee.pts
+        guard pts != kFFmpegNoPTSValue, pts > 0 else { return }
+
+        let timeBaseD = Double(stream.pointee.time_base.num) / Double(stream.pointee.time_base.den)
+        let ptsSeconds = Double(pts) * timeBaseD
+
+        if frameStartPTS < 0 {
+            frameStartWallTime = CFAbsoluteTimeGetCurrent()
+            frameStartPTS = ptsSeconds
+            return
+        }
+
+        let elapsed = ptsSeconds - frameStartPTS
+        let targetWall = frameStartWallTime + elapsed
+        let now = CFAbsoluteTimeGetCurrent()
+        let sleepSec = targetWall - now
+        if sleepSec > 0.001 {
+            usleep(UInt32(min(sleepSec, 1.0) * 1_000_000))
+        }
     }
 
     // MARK: - Private: av_rescale_q equivalent using av_rescale_rnd (avoids static inline)
