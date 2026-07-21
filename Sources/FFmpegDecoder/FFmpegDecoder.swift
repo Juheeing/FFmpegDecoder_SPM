@@ -593,11 +593,11 @@ import FFmpegCBridge
                                    interleaved: false,
                                    channelLayout: channelLayout)
 
-        if player?.isPlaying != true {
+        if engine == nil || engine?.isRunning != true {
             let eng = AVAudioEngine()
             let pNode = AVAudioPlayerNode()
             pNode.volume = 1.0
-            engine = eng    // 이전 engine 해제
+            engine = eng
             player = pNode
             eng.attach(pNode)
             eng.connect(pNode, to: eng.mainMixerNode, format: format)
@@ -611,6 +611,8 @@ import FFmpegCBridge
                 return
             }
             pNode.play()
+        } else if player?.isPlaying != true {
+            player?.play()
         }
 
         guard let audioData = extractAudioData(from: aF, ctx: aCtx),
