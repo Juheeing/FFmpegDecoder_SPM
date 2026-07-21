@@ -81,6 +81,9 @@ import FFmpegCBridge
     private var frameStartWallTime: Double = 0
     private var frameStartPTS: Double = -1
 
+    // RTSP PAUSE/PLAY 중복 전송 방지
+    private var rtspPaused = false
+
     private let decodingQueue = DispatchQueue.global(qos: .default)
 
     @objc public override init() {
@@ -107,6 +110,7 @@ import FFmpegCBridge
         sourceURL = url
         frameStartPTS = -1
         frameStartWallTime = 0
+        rtspPaused = false
         decodingQueue.async { [weak self] in
             self?.openFile(url, options: options)
         }
@@ -334,9 +338,13 @@ import FFmpegCBridge
                 }
 
                 pauseCondition.lock()
+                if !decodingStopped && isPaused {
+                    if isPlayingInternal {
+                        _ = readPause()
+                        if player?.isPlaying == true { player?.pause() }
+                    }
+                }
                 while !decodingStopped && isPaused {
-                    _ = readPause()
-                    if player?.isPlaying == true { player?.pause() }
                     if isSeeking {
                         log("FFmpeg## readSeek")
                         isSeeking = false
@@ -349,10 +357,7 @@ import FFmpegCBridge
                 if !isPlayingInternal {
                     _ = readPlay()
                     if currentState != 2 { sendState(.readyToPlay) }
-                    // resume 후 코덱 내부 상태 초기화 — pause 중 잘린 AAC 비트스트림으로 인한 디코딩 오류 방지
-                    avcodec_flush_buffers(pACtx)
                     avcodec_flush_buffers(pVCtx)
-                    // pause 동안 벽시계가 앞서 나갔으므로 타이밍 기준점 리셋
                     frameStartPTS = -1
                 }
 
@@ -369,15 +374,10 @@ import FFmpegCBridge
                     }
                 }
                 if pkt.pointee.stream_index == aidx, let aCtx = pACtx, let aF = aFrame {
-                    let sendRet = avcodec_send_packet(aCtx, pkt)
-                    if sendRet >= 0 {
-                        if avcodec_receive_frame(aCtx, aF) >= 0 {
+                    if avcodec_send_packet(aCtx, pkt) >= 0 {
+                        while avcodec_receive_frame(aCtx, aF) == 0 {
                             drawAudio()
                         }
-                    } else {
-                        // 손상된 AAC 패킷으로 코덱 상태가 깨진 경우 즉시 플러시해서 회복
-                        log("FFmpeg## audio send_packet failed: \(sendRet), flushing codec")
-                        avcodec_flush_buffers(aCtx)
                     }
                 }
                 av_packet_unref(pkt)
@@ -403,11 +403,9 @@ import FFmpegCBridge
     @discardableResult
     private func readPlay() -> Int32 {
         isPlayingInternal = true
-        // av_read_play은 RTSP 등 네트워크 스트림 전용. 로컬 파일은 호출하지 않음.
-        guard sourceURL.hasPrefix("rtsp") else {
-            if currentState != 4 { sendState(.bufferFinished) }
-            return 0
-        }
+        if currentState != 4 { sendState(.bufferFinished) }
+        guard sourceURL.hasPrefix("rtsp"), rtspPaused else { return 0 }
+        rtspPaused = false
         let ret = av_read_play(pFormatContext)
         if ret < 0 {
             log("FFmpeg## av_read_play error \(ret)")
@@ -422,11 +420,9 @@ import FFmpegCBridge
     @discardableResult
     private func readPause() -> Int32 {
         isPlayingInternal = false
-        // av_read_pause은 RTSP 등 네트워크 스트림 전용. 로컬 파일은 호출하지 않음.
-        guard sourceURL.hasPrefix("rtsp") else {
-            if currentState != 5 { sendState(.paused) }
-            return 0
-        }
+        if currentState != 5 { sendState(.paused) }
+        guard sourceURL.hasPrefix("rtsp"), !rtspPaused else { return 0 }
+        rtspPaused = true
         let ret = av_read_pause(pFormatContext)
         if ret < 0 {
             log("FFmpeg## av_read_pause error \(ret)")
