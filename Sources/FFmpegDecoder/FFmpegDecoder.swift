@@ -402,6 +402,7 @@ import FFmpegCBridge
 
     @discardableResult
     private func readPlay() -> Int32 {
+        log("FFmpeg## readPlay")
         isPlayingInternal = true
         if currentState != 4 { sendState(.bufferFinished) }
         guard sourceURL.hasPrefix("rtsp"), rtspPaused else { return 0 }
@@ -419,6 +420,7 @@ import FFmpegCBridge
 
     @discardableResult
     private func readPause() -> Int32 {
+        log("FFmpeg## readPause")
         isPlayingInternal = false
         if currentState != 5 { sendState(.paused) }
         guard sourceURL.hasPrefix("rtsp"), !rtspPaused else { return 0 }
@@ -587,9 +589,16 @@ import FFmpegCBridge
     private func drawAudio() {
         guard !decodingStopped, let aF = aFrame, let aCtx = pACtx else { return }
 
+        let sampleFmt = aCtx.pointee.sample_fmt
+        let nbSamples = Int(aF.pointee.nb_samples)
+        let nbChannels = Int(aCtx.pointee.ch_layout.nb_channels)
+        let sampleRate = Double(aF.pointee.sample_rate)
+
+        guard nbSamples > 0, nbChannels > 0 else { return }
+
         let channelLayout = AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_Stereo)!
         let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
-                                   sampleRate: Double(aF.pointee.sample_rate),
+                                   sampleRate: sampleRate,
                                    interleaved: false,
                                    channelLayout: channelLayout)
 
@@ -615,32 +624,59 @@ import FFmpegCBridge
             player?.play()
         }
 
-        guard let audioData = extractAudioData(from: aF, ctx: aCtx),
-              let pcmBuffer = AVAudioPCMBuffer(
-                  pcmFormat: format,
-                  frameCapacity: AVAudioFrameCount(audioData.count) /
-                      format.streamDescription.pointee.mBytesPerFrame)
+        guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format,
+                                               frameCapacity: AVAudioFrameCount(nbSamples))
         else { return }
+        pcmBuffer.frameLength = AVAudioFrameCount(nbSamples)
+        guard let outChannels = pcmBuffer.floatChannelData else { return }
 
-        pcmBuffer.frameLength = pcmBuffer.frameCapacity
-        if let channelData = pcmBuffer.floatChannelData {
-            (audioData as NSData).getBytes(channelData[0], length: audioData.count)
+        // Extract per-plane data pointers from AVFrame's fixed-size tuple
+        var srcPlanes = [UnsafeMutablePointer<UInt8>?](repeating: nil, count: 8)
+        withUnsafeBytes(of: aF.pointee.data) { raw in
+            let ptrs = raw.bindMemory(to: UnsafeMutablePointer<UInt8>?.self)
+            for i in 0..<min(8, ptrs.count) { srcPlanes[i] = ptrs[i] }
         }
+
+        let isPlanar = av_sample_fmt_is_planar(sampleFmt) != 0
+
+        // Fill stereo output; mono input is duplicated to both channels
+        for outCh in 0..<2 {
+            let srcCh = min(outCh, nbChannels - 1)
+            let planeIdx = isPlanar ? srcCh : 0
+            guard let plane = srcPlanes[planeIdx] else { continue }
+
+            switch sampleFmt {
+            case AV_SAMPLE_FMT_FLTP:
+                plane.withMemoryRebound(to: Float.self, capacity: nbSamples) { src in
+                    outChannels[outCh].update(from: src, count: nbSamples)
+                }
+            case AV_SAMPLE_FMT_S16P:
+                plane.withMemoryRebound(to: Int16.self, capacity: nbSamples) { src in
+                    for i in 0..<nbSamples { outChannels[outCh][i] = Float(src[i]) / 32768.0 }
+                }
+            case AV_SAMPLE_FMT_FLT:
+                plane.withMemoryRebound(to: Float.self, capacity: nbSamples * nbChannels) { src in
+                    for i in 0..<nbSamples { outChannels[outCh][i] = src[i * nbChannels + srcCh] }
+                }
+            case AV_SAMPLE_FMT_S16:
+                plane.withMemoryRebound(to: Int16.self, capacity: nbSamples * nbChannels) { src in
+                    for i in 0..<nbSamples { outChannels[outCh][i] = Float(src[i * nbChannels + srcCh]) / 32768.0 }
+                }
+            case AV_SAMPLE_FMT_S32P:
+                plane.withMemoryRebound(to: Int32.self, capacity: nbSamples) { src in
+                    for i in 0..<nbSamples { outChannels[outCh][i] = Float(src[i]) / 2147483648.0 }
+                }
+            case AV_SAMPLE_FMT_S32:
+                plane.withMemoryRebound(to: Int32.self, capacity: nbSamples * nbChannels) { src in
+                    for i in 0..<nbSamples { outChannels[outCh][i] = Float(src[i * nbChannels + srcCh]) / 2147483648.0 }
+                }
+            default:
+                log("FFmpeg## Unsupported audio sample format: \(sampleFmt.rawValue)")
+                return
+            }
+        }
+
         player?.scheduleBuffer(pcmBuffer, completionHandler: nil)
-    }
-
-    private func extractAudioData(from frame: UnsafeMutablePointer<AVFrame>,
-                                   ctx: UnsafeMutablePointer<AVCodecContext>) -> Data? {
-        let bytesPerSample = av_get_bytes_per_sample(ctx.pointee.sample_fmt)
-        let channels = ctx.pointee.ch_layout.nb_channels
-        let dataSize = Int(bytesPerSample) * Int(channels) * Int(frame.pointee.nb_samples)
-
-        // Read data[0] pointer value from the frame data tuple
-        let firstChannel: UnsafeMutablePointer<UInt8>? = withUnsafeBytes(of: frame.pointee.data) { raw in
-            raw.bindMemory(to: UnsafeMutablePointer<UInt8>?.self).first ?? nil
-        }
-        guard let ptr = firstChannel else { return nil }
-        return Data(bytes: ptr, count: dataSize)
     }
 
     // MARK: - Private: PTS-based frame timing
