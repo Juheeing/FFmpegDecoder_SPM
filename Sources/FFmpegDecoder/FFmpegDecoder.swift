@@ -36,6 +36,8 @@ import FFmpegCBridge
     @objc public weak var delegate: (any DecoderDelegate)?
     @objc public var engine: AVAudioEngine?
     @objc public var player: AVAudioPlayerNode?
+    private var varispeedNode: AVAudioUnitVarispeed?
+    private var playbackRate: Double = 1.0
 
     // FFmpeg C context pointers
     private var swsCtx: OpaquePointer?
@@ -160,6 +162,14 @@ import FFmpegCBridge
 
     @objc public func isPlaying() -> Bool {
         return !isPaused
+    }
+
+    @objc public func setPlaybackRate(_ rate: Double) {
+        varispeedNode?.rate = Float(rate)
+        decodingQueue.async { [weak self] in
+            self?.playbackRate = rate
+            self?.frameStartPTS = -1
+        }
     }
 
     // MARK: - Logging
@@ -606,10 +616,15 @@ import FFmpegCBridge
             let eng = AVAudioEngine()
             let pNode = AVAudioPlayerNode()
             pNode.volume = 1.0
+            let vsNode = AVAudioUnitVarispeed()
+            vsNode.rate = Float(playbackRate)
             engine = eng
             player = pNode
+            varispeedNode = vsNode
             eng.attach(pNode)
-            eng.connect(pNode, to: eng.mainMixerNode, format: format)
+            eng.attach(vsNode)
+            eng.connect(pNode, to: vsNode, format: format)
+            eng.connect(vsNode, to: eng.mainMixerNode, format: format)
             eng.prepare()
             do {
                 try eng.start()
@@ -702,7 +717,7 @@ import FFmpegCBridge
         }
 
         let elapsed = ptsSeconds - frameStartPTS
-        let targetWall = frameStartWallTime + elapsed
+        let targetWall = frameStartWallTime + elapsed / playbackRate
         let now = CFAbsoluteTimeGetCurrent()
         let sleepSec = targetWall - now
         if sleepSec > 0.001 {
@@ -732,6 +747,7 @@ import FFmpegCBridge
         if let ptr = dst_data[0] { av_free(UnsafeMutableRawPointer(ptr)); dst_data[0] = nil }
         if engine?.isRunning == true { engine?.stop() }
         if player?.isPlaying == true { player?.stop() }
+        varispeedNode = nil
         ffmpeg_remove_log_callback()
     }
 
