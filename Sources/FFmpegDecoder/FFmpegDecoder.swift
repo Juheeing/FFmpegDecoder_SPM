@@ -362,6 +362,14 @@ import FFmpegCBridge
                     }
                     pauseCondition.wait()
                 }
+                // pause/seek/resume이 모두 디코딩 루프보다 먼저 실행된 경우
+                // isPaused가 이미 false로 돌아와 while 루프를 진입하지 못했어도 seek를 처리
+                if isSeeking {
+                    log("FFmpeg## readSeek (playing)")
+                    isSeeking = false
+                    if player?.isPlaying == true { player?.stop() }
+                    _ = readSeek(seekTarget)
+                }
                 pauseCondition.unlock()
 
                 if !isPlayingInternal {
