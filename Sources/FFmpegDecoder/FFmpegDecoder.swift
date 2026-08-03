@@ -31,11 +31,14 @@ import FFmpegCBridge
 
 @objc public final class FFmpegDecoder: NSObject {
 
-    private static let version = "1.0.6"
+    private static let version = "1.0.7"
 
     @objc public weak var delegate: (any DecoderDelegate)?
     @objc public var engine: AVAudioEngine?
     @objc public var player: AVAudioPlayerNode?
+    /// 영상 회전 각도. 0(기본값), 90, 270만 유효.
+    @objc public var rotationDegrees: Int = 0
+    
     private var varispeedNode: AVAudioUnitVarispeed?
     private var playbackRate: Double = 1.0
 
@@ -595,11 +598,17 @@ import FFmpegCBridge
 
         DispatchQueue.main.async { [weak self] in
             guard let self, !decodingStopped else { return }
-            let ci = CIImage(bitmapData: imageData,
+            var ci = CIImage(bitmapData: imageData,
                              bytesPerRow: Int(linesize),
                              size: CGSize(width: Int(width), height: Int(height)),
                              format: .RGBA8,
                              colorSpace: CGColorSpaceCreateDeviceRGB())
+            if rotationDegrees == 90 || rotationDegrees == 270 {
+                let radians: CGFloat = rotationDegrees == 90 ? -.pi / 2 : .pi / 2
+                let rotated = ci.transformed(by: CGAffineTransform(rotationAngle: radians))
+                ci = rotated.transformed(by: CGAffineTransform(translationX: -rotated.extent.minX,
+                                                                y: -rotated.extent.minY))
+            }
             delegate?.receivedDecodedCIImage(ci)
         }
     }
