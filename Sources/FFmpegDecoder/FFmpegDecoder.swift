@@ -90,6 +90,7 @@ import FFmpegCBridge
     private var rtspPaused = false
 
     private let decodingQueue = DispatchQueue.global(qos: .default)
+    private let decodingGroup = DispatchGroup()
 
     @objc public override init() {
         stoppedFlag.initialize(to: false)
@@ -98,8 +99,13 @@ import FFmpegCBridge
 
     deinit {
         stopDecoding()
-        clearResources()
-        stoppedFlag.deallocate()
+        // stoppedFlag must outlive the decoding loop's interrupt callback.
+        // notify fires asynchronously after the decoding loop (and clearResources) finishes,
+        // avoiding both the original race condition and the serial-queue deadlock.
+        let flag = stoppedFlag
+        decodingGroup.notify(queue: .global()) {
+            flag.deallocate()
+        }
     }
 
     // MARK: - Public API
@@ -116,8 +122,11 @@ import FFmpegCBridge
         frameStartPTS = -1
         frameStartWallTime = 0
         rtspPaused = false
-        decodingQueue.async { [weak self] in
+        let group = decodingGroup
+        group.enter()
+        decodingQueue.async { [weak self, group] in
             self?.openFile(url, options: options)
+            group.leave()
         }
     }
 
