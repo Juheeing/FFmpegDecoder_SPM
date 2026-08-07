@@ -310,6 +310,13 @@ import FFmpegCBridge
             }
             pVCtx = avcodec_alloc_context3(vCodec)
             avcodec_parameters_to_context(pVCtx, pVPara)
+            var hwCtx: UnsafeMutablePointer<AVBufferRef>? = nil
+            if av_hwdevice_ctx_create(&hwCtx, AV_HWDEVICE_TYPE_VIDEOTOOLBOX, nil, nil, 0) == 0 {
+                pVCtx?.pointee.hw_device_ctx = hwCtx
+                log("FFmpeg## VideoToolbox hardware acceleration enabled")
+            } else {
+                log("FFmpeg## VideoToolbox not available, using software decoding")
+            }
             avcodec_open2(pVCtx, vCodec, nil)
             log("FFmpeg## 비디오 코덱: \(vCodec.pointee.id.rawValue), \(String(cString: vCodec.pointee.name))")
         }
@@ -558,21 +565,36 @@ import FFmpegCBridge
     }
 
     private func drawImage() {
-        guard !decodingStopped, let vF = vFrame, let vCtx = pVCtx else { return }
+        guard !decodingStopped, let vF = vFrame, pVCtx != nil else { return }
 
-        let width = vF.pointee.width
-        let height = vF.pointee.height
+        // Transfer hardware (VideoToolbox) frame to software if needed
+        var frameToProcess: UnsafeMutablePointer<AVFrame> = vF
+        var swFrameLocal: UnsafeMutablePointer<AVFrame>? = nil
+        if vF.pointee.format == AV_PIX_FMT_VIDEOTOOLBOX.rawValue {
+            guard let sf = av_frame_alloc() else { return }
+            swFrameLocal = sf
+            guard av_hwframe_transfer_data(sf, vF, 0) == 0 else { return }
+            frameToProcess = sf
+        }
+        defer {
+            var toFree = swFrameLocal
+            if toFree != nil { av_frame_free(&toFree) }
+        }
+
+        let width = frameToProcess.pointee.width
+        let height = frameToProcess.pointee.height
+        let frameFmt = AVPixelFormat(rawValue: frameToProcess.pointee.format)
 
         if swsCtx == nil {
             swsCtx = sws_getContext(
-                vCtx.pointee.width, vCtx.pointee.height, vCtx.pointee.pix_fmt,
+                width, height, frameFmt,
                 Int32(outputFrameSize.width), Int32(outputFrameSize.height),
                 AV_PIX_FMT_RGBA, SWS_FAST_BILINEAR, nil, nil, nil
             )
             dst_data.withUnsafeMutableBufferPointer { dataBuf in
                 dst_linesize.withUnsafeMutableBufferPointer { sizeBuf in
                     _ = av_image_alloc(dataBuf.baseAddress, sizeBuf.baseAddress,
-                                       vCtx.pointee.width, vCtx.pointee.height,
+                                       Int32(outputFrameSize.width), Int32(outputFrameSize.height),
                                        AV_PIX_FMT_RGBA, 1)
                 }
             }
@@ -580,12 +602,12 @@ import FFmpegCBridge
 
         // Extract frame data pointers from the fixed-size tuple
         var srcData = [UnsafePointer<UInt8>?](repeating: nil, count: 8)
-        withUnsafeBytes(of: vF.pointee.data) { raw in
+        withUnsafeBytes(of: frameToProcess.pointee.data) { raw in
             let ptrs = raw.bindMemory(to: UnsafePointer<UInt8>?.self)
             for i in 0..<min(8, ptrs.count) { srcData[i] = ptrs[i] }
         }
         var srcStride = [Int32](repeating: 0, count: 8)
-        withUnsafeBytes(of: vF.pointee.linesize) { raw in
+        withUnsafeBytes(of: frameToProcess.pointee.linesize) { raw in
             let sizes = raw.bindMemory(to: Int32.self)
             for i in 0..<min(8, sizes.count) { srcStride[i] = sizes[i] }
         }
