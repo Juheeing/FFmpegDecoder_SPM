@@ -396,11 +396,12 @@ import FFmpegCBridge
                 if pkt.pointee.stream_index == vidx, let vCtx = pVCtx, let vF = vFrame {
                     if avcodec_send_packet(vCtx, pkt) >= 0,
                        avcodec_receive_frame(vCtx, vF) >= 0 {
+                        var displayDelay: Double = 0
                         if let vStream = pVStream {
                             getCurrentTime(vF, stream: vStream)
-                            throttleVideo(frame: vF, stream: vStream)
+                            displayDelay = throttleVideo(frame: vF, stream: vStream)
                         }
-                        drawImage()
+                        drawImage(delay: displayDelay)
                     }
                 }
                 if pkt.pointee.stream_index == aidx, let aCtx = pACtx, let aF = aFrame {
@@ -557,7 +558,7 @@ import FFmpegCBridge
         }
     }
 
-    private func drawImage() {
+    private func drawImage(delay: Double = 0) {
         guard !decodingStopped, let vF = vFrame, let vCtx = pVCtx else { return }
 
         let width = vF.pointee.width
@@ -605,20 +606,25 @@ import FFmpegCBridge
         let linesize = dst_linesize[0]
         let imageData = Data(bytes: firstPtr, count: Int(linesize) * Int(height))
 
-        DispatchQueue.main.async { [weak self] in
-            guard let self, !decodingStopped else { return }
+        let display = { [weak self] in
+            guard let self, !self.decodingStopped else { return }
             var ci = CIImage(bitmapData: imageData,
                              bytesPerRow: Int(linesize),
                              size: CGSize(width: Int(width), height: Int(height)),
                              format: .RGBA8,
                              colorSpace: CGColorSpaceCreateDeviceRGB())
-            if rotationDegrees == 90 || rotationDegrees == 270 {
-                let radians: CGFloat = rotationDegrees == 90 ? -.pi / 2 : .pi / 2
+            if self.rotationDegrees == 90 || self.rotationDegrees == 270 {
+                let radians: CGFloat = self.rotationDegrees == 90 ? -.pi / 2 : .pi / 2
                 let rotated = ci.transformed(by: CGAffineTransform(rotationAngle: radians))
                 ci = rotated.transformed(by: CGAffineTransform(translationX: -rotated.extent.minX,
                                                                 y: -rotated.extent.minY))
             }
-            delegate?.receivedDecodedCIImage(ci)
+            self.delegate?.receivedDecodedCIImage(ci)
+        }
+        if delay > 0.001 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: display)
+        } else {
+            DispatchQueue.main.async(execute: display)
         }
     }
 
@@ -723,15 +729,16 @@ import FFmpegCBridge
     // MARK: - Private: PTS-based frame timing
 
     // RTSP 스트림은 네트워크 자체가 패킷 속도를 제한하므로 추가 조절 불필요.
-    // file:// / http:// 는 av_read_frame이 즉시 리턴하기 때문에 PTS를 보고 슬립해야 함.
+    // file:// / http:// 는 av_read_frame이 즉시 리턴하기 때문에 PTS 기반 delay를 반환해
+    // 디코딩 루프를 블록하지 않고 drawImage가 asyncAfter로 표시 타이밍을 맞춘다.
     private func throttleVideo(frame: UnsafeMutablePointer<AVFrame>,
-                                stream: UnsafeMutablePointer<AVStream>) {
-        guard !sourceURL.hasPrefix("rtsp") else { return }
+                                stream: UnsafeMutablePointer<AVStream>) -> Double {
+        guard !sourceURL.hasPrefix("rtsp") else { return 0 }
 
         let pts = frame.pointee.best_effort_timestamp != kFFmpegNoPTSValue
             ? frame.pointee.best_effort_timestamp
             : frame.pointee.pts
-        guard pts != kFFmpegNoPTSValue, pts > 0 else { return }
+        guard pts != kFFmpegNoPTSValue, pts > 0 else { return 0 }
 
         let timeBaseD = Double(stream.pointee.time_base.num) / Double(stream.pointee.time_base.den)
         let ptsSeconds = Double(pts) * timeBaseD
@@ -739,16 +746,14 @@ import FFmpegCBridge
         if frameStartPTS < 0 {
             frameStartWallTime = CFAbsoluteTimeGetCurrent()
             frameStartPTS = ptsSeconds
-            return
+            return 0
         }
 
         let elapsed = ptsSeconds - frameStartPTS
         let targetWall = frameStartWallTime + elapsed / playbackRate
         let now = CFAbsoluteTimeGetCurrent()
         let sleepSec = targetWall - now
-        if sleepSec > 0.001 {
-            usleep(UInt32(min(sleepSec, 1.0) * 1_000_000))
-        }
+        return max(0, min(sleepSec, 1.0))
     }
 
     // MARK: - Private: av_rescale_q equivalent using av_rescale_rnd (avoids static inline)
