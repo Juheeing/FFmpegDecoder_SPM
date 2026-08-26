@@ -132,10 +132,10 @@ import FFmpegCBridge
 
     @objc public func stopDecoding() {
         log("FFmpeg## stopDecoding")
+        stoppedFlag.pointee = true
         pauseCondition.lock()
         let shouldNotify = !decodingStopped && currentState != 0
         decodingStopped = true
-        stoppedFlag.pointee = true
         pauseCondition.signal()
         pauseCondition.unlock()
         if shouldNotify { sendState(.stop) }
