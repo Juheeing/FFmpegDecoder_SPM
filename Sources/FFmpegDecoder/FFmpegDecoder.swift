@@ -86,6 +86,11 @@ import FFmpegCBridge
     private var frameStartWallTime: Double = 0
     private var frameStartPTS: Double = -1
 
+    // First packet logging
+    private var videoFirstPacketLogged = false
+    private var videoFirstValidPTSLogged = false
+    private var audioFirstPacketLogged = false
+
     // RTSP PAUSE/PLAY 중복 전송 방지
     private var rtspPaused = false
 
@@ -122,6 +127,9 @@ import FFmpegCBridge
         frameStartPTS = -1
         frameStartWallTime = 0
         rtspPaused = false
+        videoFirstPacketLogged = false
+        videoFirstValidPTSLogged = false
+        audioFirstPacketLogged = false
         let group = decodingGroup
         group.enter()
         decodingQueue.async { [weak self, group] in
@@ -400,9 +408,31 @@ import FFmpegCBridge
 
                 guard let pkt = packet else { continue }
 
+                let _pktSI = pkt.pointee.stream_index
+                let _trackTag = _pktSI == vidx ? "V" : (_pktSI == aidx ? "A" : "?")
+                log("FFmpeg## [PKT.\(_trackTag)] pts=\(pkt.pointee.pts) dts=\(pkt.pointee.dts)")
+
                 if pkt.pointee.stream_index == vidx, let vCtx = pVCtx, let vF = vFrame {
                     if avcodec_send_packet(vCtx, pkt) >= 0,
                        avcodec_receive_frame(vCtx, vF) >= 0 {
+                        let vFramePTS = vF.pointee.pts
+                        let vBestPTS = vF.pointee.best_effort_timestamp
+                        let tb = pVStream?.pointee.time_base
+                        let tbNum = tb?.num ?? 0
+                        let tbDen = tb?.den ?? 1
+                        if !videoFirstPacketLogged {
+                            videoFirstPacketLogged = true
+                            let pktPTS = pkt.pointee.pts
+                            log("FFmpeg## [Video] first frame — frame_pts=\(vFramePTS) best_effort=\(vBestPTS) pkt_pts=\(pktPTS) tb=\(tbNum)/\(tbDen)")
+                        }
+                        if !videoFirstValidPTSLogged {
+                            let rawPTS = vFramePTS != kFFmpegNoPTSValue ? vFramePTS : vBestPTS
+                            if rawPTS != kFFmpegNoPTSValue, tbDen > 0 {
+                                videoFirstValidPTSLogged = true
+                                let ptsSec = Double(rawPTS) * Double(tbNum) / Double(tbDen)
+                                log("FFmpeg## [Video] first valid PTS — frame_pts=\(vFramePTS) best_effort=\(vBestPTS) pts_sec=\(String(format: "%.4f", ptsSec))")
+                            }
+                        }
                         if let vStream = pVStream {
                             getCurrentTime(vF, stream: vStream)
                             throttleVideo(frame: vF, stream: vStream)
@@ -485,7 +515,7 @@ import FFmpegCBridge
         ptsOffset = 0
         hasPendingSeek = true
         pendingSeekSeconds = seconds
-        frameStartPTS = -1  // seek 후 타이밍 기준점 리셋
+        frameStartPTS = -1
 
         let timestamp = Int64(seconds * Double(AV_TIME_BASE))
         avcodec_flush_buffers(pVCtx)
@@ -661,6 +691,7 @@ import FFmpegCBridge
                                    channelLayout: channelLayout)
 
         if engine == nil || engine?.isRunning != true {
+            audioFirstPacketLogged = false
             let eng = AVAudioEngine()
             let pNode = AVAudioPlayerNode()
             pNode.volume = 1.0
@@ -685,6 +716,17 @@ import FFmpegCBridge
             pNode.play()
         } else if player?.isPlaying != true {
             player?.play()
+        }
+
+        if !audioFirstPacketLogged {
+            let rawPTS = aF.pointee.pts != kFFmpegNoPTSValue ? aF.pointee.pts : aF.pointee.best_effort_timestamp
+            if rawPTS != kFFmpegNoPTSValue, let aStream = pAStream {
+                audioFirstPacketLogged = true
+                let tb = aStream.pointee.time_base
+                let ptsSec = Double(rawPTS) * Double(tb.num) / Double(tb.den)
+                let dts = aF.pointee.pkt_dts
+                log("FFmpeg## [Audio] first packet — pts=\(rawPTS) dts=\(dts) tb=\(tb.num)/\(tb.den) pts_sec=\(String(format: "%.4f", ptsSec)) sampleRate=\(Int(sampleRate))Hz")
+            }
         }
 
         guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format,
