@@ -28,40 +28,26 @@ let package = Package(
             publicHeadersPath: "."
         ),
 
-        // ObjC 브릿지 타겟 (va_list 로그 콜백 등 Swift에서 구현 불가한 C 코드)
-        .target(
-            name: "FFmpegCBridge",
-            dependencies: [
-                "FFmpegHeaders",
-                "libavcodec", "libavformat",
-                "libavutil", "libswresample", "libswscale"
-            ],
-            path: "Sources/FFmpegCBridge",
-            publicHeadersPath: ".",
-            cSettings: [
-                .headerSearchPath("../FFmpegHeaders")
-            ]
-        ),
-
-        // Swift FFmpegDecoder 타겟
+        // ObjC FFmpegDecoder 타겟
         .target(
             name: "FFmpegDecoder",
             dependencies: [
                 "FFmpegHeaders",
-                "FFmpegCBridge",
                 "libavcodec", "libavformat",
                 "libavutil", "libswresample", "libswscale"
             ],
             path: "Sources/FFmpegDecoder",
-            swiftSettings: [
-                .swiftLanguageMode(.v5)
+            publicHeadersPath: ".",
+            cSettings: [
+                .headerSearchPath("../FFmpegHeaders")
+            ],
+            linkerSettings: [
+                .linkedLibrary("z"),
+                .linkedLibrary("bz2"),
+                .linkedLibrary("iconv"),
+                .linkedLibrary("lzma"),
+                .linkedLibrary("resolv")
             ]
-        ),
-
-        // 테스트 타겟
-        .testTarget(
-            name: "FFmpegDecoderTests",
-            dependencies: ["FFmpegDecoder"]
         )
     ]
 )
