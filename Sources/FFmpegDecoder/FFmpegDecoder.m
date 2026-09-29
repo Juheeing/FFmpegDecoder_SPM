@@ -23,6 +23,7 @@ static __weak FFmpegDecoder *gCurrentDecoder = nil;
     BOOL hasPendingSeek, hasEverSeeked;         // seek 직후 첫 프레임에서 보정할 플래그
     double pendingSeekSeconds;   // 사용자가 요청한 seek 시간
     BOOL needLog, needInterrupt;
+    NSString *logFilePath;
     NSCondition *pauseCondition;
     int64_t lastRescaledPTS;      // 이전 프레임 pts (rescaled)
     int64_t ptsOffset;           // 누적 offset
@@ -87,49 +88,53 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
     
     NSString *logMessage = [NSString stringWithUTF8String:log_buf];
 
-    NSLog(@"%@", logMessage);
     FFmpegDecoder *decoder = gCurrentDecoder;
     if (decoder) [decoder logToFile:logMessage];
+    else NSLog(@"%@", logMessage);
 }
 
 - (void)logToFile:(NSString *)text {
-    
+
     NSLog(@"%@", text);
-    
-    if (self->needLog) {
-        
-        NSDate *now = [NSDate date];
-        
-        // 파일 이름용 날짜 포맷터
-        NSDateFormatter *fileFormatter = [[NSDateFormatter alloc] init];
-        [fileFormatter setDateFormat:@"yyyy-MM-dd_HH"];
-        NSString *fileName = [[fileFormatter stringFromDate:now] stringByAppendingString:@".txt"];
-        
-        // 파일 경로 설정
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        NSURL *documentsURL = [[fileManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask] firstObject];
-        NSURL *fileURL = [documentsURL URLByAppendingPathComponent:fileName];
-        
-        // 로그에 타임스탬프 추가
+
+    if (self->needLog && logFilePath) {
         NSDateFormatter *timestampFormatter = [[NSDateFormatter alloc] init];
         [timestampFormatter setDateFormat:@"HH:mm:ss"];
-        NSString *timestamp = [timestampFormatter stringFromDate:now];
-        
+        NSString *timestamp = [timestampFormatter stringFromDate:[NSDate date]];
+
         NSString *logText = [NSString stringWithFormat:@"[%@] %@\n", timestamp, text];
         NSData *logData = [logText dataUsingEncoding:NSUTF8StringEncoding];
-        
-        // 파일이 존재하면 append, 아니면 새로 생성
-        if ([fileManager fileExistsAtPath:[fileURL path]]) {
-            NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:[fileURL path]];
+
+        NSFileManager *fileManager = [NSFileManager defaultManager];
+        if ([fileManager fileExistsAtPath:logFilePath]) {
+            NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:logFilePath];
             if (fileHandle) {
                 [fileHandle seekToEndOfFile];
                 [fileHandle writeData:logData];
                 [fileHandle closeFile];
             }
         } else {
-            [logData writeToURL:fileURL atomically:YES];
+            [logData writeToURL:[NSURL fileURLWithPath:logFilePath] atomically:YES];
         }
     }
+}
+
+- (void)setupLogFilePath {
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    NSURL *documentsURL = [[fileManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask] firstObject];
+
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    [formatter setDateFormat:@"yyyy-MM-dd_HH-mm-ss"];
+    NSString *baseName = [formatter stringFromDate:[NSDate date]];
+
+    NSString *candidate = [baseName stringByAppendingString:@".txt"];
+    NSURL *fileURL = [documentsURL URLByAppendingPathComponent:candidate];
+    int suffix = 2;
+    while ([fileManager fileExistsAtPath:[fileURL path]]) {
+        candidate = [NSString stringWithFormat:@"%@ (%d).txt", baseName, suffix++];
+        fileURL = [documentsURL URLByAppendingPathComponent:candidate];
+    }
+    logFilePath = [fileURL path];
 }
 
 - (void)startStreaming:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options
@@ -138,6 +143,7 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
     self->decodingStopped = NO;
     self->needLog = needLog;
     self->needInterrupt = needInterrupt;
+    if (needLog) [self setupLogFilePath];
     self->videoFirstPacketLogged = NO;
     self->videoFirstValidPTSLogged = NO;
     self->audioFirstPacketLogged = NO;
