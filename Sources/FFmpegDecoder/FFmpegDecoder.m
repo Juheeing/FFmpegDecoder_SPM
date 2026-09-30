@@ -1,4 +1,5 @@
 #import "FFmpegDecoder.h"
+#include <sys/time.h>
 #define FFMPEG_DECODER_VERSION @"1.0.6"
 
 static __weak FFmpegDecoder *gCurrentDecoder = nil;
@@ -31,6 +32,10 @@ static __weak FFmpegDecoder *gCurrentDecoder = nil;
     BOOL videoFirstPacketLogged;
     BOOL videoFirstValidPTSLogged;
     BOOL audioFirstPacketLogged;
+    BOOL engineInitialized;
+    double decodingStartWallTime;
+    double decodingStartPTS;
+    BOOL firstVideoFrameSeen;
 }
 
 - (id) init {
@@ -50,6 +55,10 @@ static __weak FFmpegDecoder *gCurrentDecoder = nil;
         videoFirstPacketLogged = NO;
         videoFirstValidPTSLogged = NO;
         audioFirstPacketLogged = NO;
+        engineInitialized = NO;
+        firstVideoFrameSeen = NO;
+        decodingStartWallTime = 0;
+        decodingStartPTS = 0;
     }
     return self;
 }
@@ -72,6 +81,8 @@ static __weak FFmpegDecoder *gCurrentDecoder = nil;
     if (dst_data) { av_freep(&dst_data[0]); dst_data[0] = NULL; }
     if ([self.engine isRunning]) { [self.engine stop]; }
     if ([self.player isPlaying]) { [self.player stop]; }
+    engineInitialized = NO;
+    firstVideoFrameSeen = NO;
 }
 
 static int ffmpeg_interrupt_cb(void *ctx) {
@@ -385,6 +396,24 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
                                     (long long)vFrame->pts, (long long)vFrame->best_effort_timestamp, ptsSec]];
                             }
                         }
+                        // AV sync: video PTS 기반으로 decode loop 속도 제어
+                        int64_t syncPTS = (vFrame->pts != AV_NOPTS_VALUE) ? vFrame->pts : vFrame->best_effort_timestamp;
+                        if (syncPTS != AV_NOPTS_VALUE) {
+                            double ptsSec = syncPTS * av_q2d(pVStream->time_base);
+                            struct timeval tv;
+                            gettimeofday(&tv, NULL);
+                            double now = tv.tv_sec + tv.tv_usec / 1e6;
+                            if (!firstVideoFrameSeen) {
+                                firstVideoFrameSeen = YES;
+                                decodingStartWallTime = now;
+                                decodingStartPTS = ptsSec;
+                            } else {
+                                double sleepSec = (ptsSec - decodingStartPTS) - (now - decodingStartWallTime);
+                                if (sleepSec > 0.001 && sleepSec < 1.0) {
+                                    usleep((useconds_t)(sleepSec * 1e6));
+                                }
+                            }
+                        }
                         [self getCurrentTime:vFrame stream:pVStream];
                         [self drawImage];
                     }
@@ -521,6 +550,7 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
         ptsOffset = 0;
         hasPendingSeek = YES;
         pendingSeekSeconds = seconds;
+        firstVideoFrameSeen = NO;
         
         int64_t timestamp = (int64_t)(seconds * AV_TIME_BASE);
 
@@ -660,54 +690,43 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
 
 - (void) drawAudio {
     if (self->decodingStopped) return;
-    
-    AVAudioChannelLayout *channelLayout = [[AVAudioChannelLayout alloc] initWithLayoutTag:kAudioChannelLayoutTag_Stereo];
+
+    int channels = pACtx->ch_layout.nb_channels;
+    AudioChannelLayoutTag layoutTag = (channels == 1) ? kAudioChannelLayoutTag_Mono : kAudioChannelLayoutTag_Stereo;
+    AVAudioChannelLayout *channelLayout = [[AVAudioChannelLayout alloc] initWithLayoutTag:layoutTag];
     AVAudioFormat *format = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
                                                              sampleRate:aFrame->sample_rate
                                                            interleaved:NO
                                                          channelLayout:channelLayout];
-    
-    if (![self.player isPlaying]) {
+
+    // 엔진은 한 번만 초기화 (버퍼 언더런 시 재초기화 금지)
+    if (!engineInitialized) {
+        engineInitialized = YES;
         self.engine = [[AVAudioEngine alloc] init];
         self.player = [[AVAudioPlayerNode alloc] init];
         self.player.volume = 1.0;
         [self.engine attachNode:self.player];
-
-        AVAudioMixerNode *mainMixer = [self.engine mainMixerNode];
-        
-        [self.engine connect:self.player to:mainMixer format:format];
-        
-        if (!self.engine.isRunning) {
-            [self.engine prepare];
-            NSError *error;
-            BOOL success;
-            success = [self.engine startAndReturnError:&error];
-            NSAssert(success, @"couldn't start engine, %@", [error localizedDescription]);
-        }
+        [self.engine connect:self.player to:self.engine.mainMixerNode format:format];
+        [self.engine prepare];
+        NSError *error;
+        BOOL success = [self.engine startAndReturnError:&error];
+        NSAssert(success, @"couldn't start engine, %@", [error localizedDescription]);
         [self.player play];
     }
-    
-    NSData *data = [self playAudioFrame:aFrame];
-    AVAudioPCMBuffer *pcmBuffer = [[AVAudioPCMBuffer alloc]
-                                  initWithPCMFormat:format
-                                  frameCapacity:(uint32_t)(data.length)
-                                  /format.streamDescription->mBytesPerFrame];
 
-    pcmBuffer.frameLength = pcmBuffer.frameCapacity;
+    int nb_samples = aFrame->nb_samples;
+    AVAudioPCMBuffer *pcmBuffer = [[AVAudioPCMBuffer alloc] initWithPCMFormat:format frameCapacity:nb_samples];
+    pcmBuffer.frameLength = nb_samples;
 
-    [data getBytes:*pcmBuffer.floatChannelData length:data.length];
+    // planar(non-interleaved) 포맷: 채널별로 data[ch]에 분리 저장됨
+    int numChannels = (int)MIN(channels, (int)format.channelCount);
+    for (int ch = 0; ch < numChannels; ch++) {
+        if (aFrame->data[ch]) {
+            memcpy(pcmBuffer.floatChannelData[ch], aFrame->data[ch], nb_samples * sizeof(float));
+        }
+    }
 
     [self.player scheduleBuffer:pcmBuffer completionHandler:nil];
-}
-
-- (NSData *)playAudioFrame:(AVFrame *)audioFrame {
-    
-    int bytesPerSample = av_get_bytes_per_sample(pACtx->sample_fmt);
-    int channels = pACtx->ch_layout.nb_channels; // 최신 FFmpeg (5.x 이상)에서는 ch_layout 사용
-    int dataSize = bytesPerSample * channels * audioFrame->nb_samples;
-
-    NSData *audioData = [NSData dataWithBytes:audioFrame->data[0] length:dataSize];
-    return audioData;
 }
 
 @end
