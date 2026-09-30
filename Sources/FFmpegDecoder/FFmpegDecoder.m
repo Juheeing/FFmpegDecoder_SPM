@@ -354,7 +354,9 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
             
             [self->pauseCondition lock];
             
+            BOOL wasPaused = NO;
             while (!self->decodingStopped && self->isPaused) {
+                wasPaused = YES;
                 [self readPause];
                 if (_player.isPlaying) {
                     [_player pause];
@@ -367,7 +369,12 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
                 [self->pauseCondition wait];
             }
             [self->pauseCondition unlock];
-            
+
+            // pause에서 실제로 대기했다가 resume된 경우에만 타이밍 리셋
+            if (wasPaused) {
+                firstVideoFrameSeen = NO;
+            }
+
             if (!self->isPlaying) {
                 [self readPlay];
                 if (currentState != 2) { [self sendCurrentState:2]; }
@@ -711,6 +718,9 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
         NSError *error;
         BOOL success = [self.engine startAndReturnError:&error];
         NSAssert(success, @"couldn't start engine, %@", [error localizedDescription]);
+        [self.player play];
+    } else if (self.player && !self.player.isPlaying) {
+        // pause 후 resume 시 player 재시작
         [self.player play];
     }
 
