@@ -35,7 +35,7 @@ static __weak FFmpegDecoder *gCurrentDecoder = nil;
     BOOL engineInitialized;
     double decodingStartWallTime;
     double decodingStartPTS;
-    BOOL firstVideoFrameSeen;
+    BOOL firstAudioFrameSeen;
 }
 
 - (id) init {
@@ -56,7 +56,7 @@ static __weak FFmpegDecoder *gCurrentDecoder = nil;
         videoFirstValidPTSLogged = NO;
         audioFirstPacketLogged = NO;
         engineInitialized = NO;
-        firstVideoFrameSeen = NO;
+        firstAudioFrameSeen = NO;
         decodingStartWallTime = 0;
         decodingStartPTS = 0;
     }
@@ -82,7 +82,7 @@ static __weak FFmpegDecoder *gCurrentDecoder = nil;
     if ([self.engine isRunning]) { [self.engine stop]; }
     if ([self.player isPlaying]) { [self.player stop]; }
     engineInitialized = NO;
-    firstVideoFrameSeen = NO;
+    firstAudioFrameSeen = NO;
 }
 
 static int ffmpeg_interrupt_cb(void *ctx) {
@@ -372,7 +372,7 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
 
             // pause에서 실제로 대기했다가 resume된 경우에만 타이밍 리셋
             if (wasPaused) {
-                firstVideoFrameSeen = NO;
+                firstAudioFrameSeen = NO;
             }
 
             if (!self->isPlaying) {
@@ -403,25 +403,6 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
                                     (long long)vFrame->pts, (long long)vFrame->best_effort_timestamp, ptsSec]];
                             }
                         }
-                        // AV sync: video PTS 기반으로 decode loop 속도 제어
-                        int64_t syncPTS = (vFrame->pts != AV_NOPTS_VALUE) ? vFrame->pts : vFrame->best_effort_timestamp;
-                        if (syncPTS != AV_NOPTS_VALUE) {
-                            double ptsSec = syncPTS * av_q2d(pVStream->time_base);
-                            struct timeval tv;
-                            gettimeofday(&tv, NULL);
-                            double now = tv.tv_sec + tv.tv_usec / 1e6;
-                            if (!firstVideoFrameSeen) {
-                                firstVideoFrameSeen = YES;
-                                decodingStartWallTime = now;
-                                decodingStartPTS = ptsSec;
-                            } else {
-                                double sleepSec = (ptsSec - decodingStartPTS) - (now - decodingStartWallTime);
-                                if (sleepSec > 0.001 && sleepSec < 1.0) {
-                                    usleep((useconds_t)(sleepSec * 1e6));
-                                }
-                            }
-                        }
-                        [self getCurrentTime:vFrame stream:pVStream];
                         [self drawImage];
                     }
                 }
@@ -441,6 +422,25 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
                                     (long long)rawPTS, (long long)dts, tb.num, tb.den, ptsSec, aFrame->sample_rate]];
                             }
                         }
+                        // AV sync: audio PTS 기반으로 decode loop 속도 제어
+                        int64_t syncPTS = (aFrame->pts != AV_NOPTS_VALUE) ? aFrame->pts : aFrame->best_effort_timestamp;
+                        if (syncPTS != AV_NOPTS_VALUE && pAStream) {
+                            double ptsSec = syncPTS * av_q2d(pAStream->time_base);
+                            struct timeval tv;
+                            gettimeofday(&tv, NULL);
+                            double now = tv.tv_sec + tv.tv_usec / 1e6;
+                            if (!firstAudioFrameSeen) {
+                                firstAudioFrameSeen = YES;
+                                decodingStartWallTime = now;
+                                decodingStartPTS = ptsSec;
+                            } else {
+                                double sleepSec = (ptsSec - decodingStartPTS) - (now - decodingStartWallTime);
+                                if (sleepSec > 0.001 && sleepSec < 1.0) {
+                                    usleep((useconds_t)(sleepSec * 1e6));
+                                }
+                            }
+                        }
+                        [self getCurrentTime:aFrame stream:pAStream];
                         [self drawAudio];
                     }
                 }
@@ -557,8 +557,8 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
         ptsOffset = 0;
         hasPendingSeek = YES;
         pendingSeekSeconds = seconds;
-        firstVideoFrameSeen = NO;
-        
+        firstAudioFrameSeen = NO;
+
         int64_t timestamp = (int64_t)(seconds * AV_TIME_BASE);
 
         // 디코더 상태 초기화
