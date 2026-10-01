@@ -403,6 +403,9 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
                                     (long long)vFrame->pts, (long long)vFrame->best_effort_timestamp, ptsSec]];
                             }
                         }
+                        if (aidx < 0) { // 오디오가 없는 영상(타임랩스 등)
+                            [self getCurrentTime:vFrame stream:pVStream];
+                        }
                         [self drawImage];
                     }
                 }
