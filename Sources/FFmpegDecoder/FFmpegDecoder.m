@@ -39,6 +39,7 @@ static __weak FFmpegDecoder *gCurrentDecoder = nil;
     double decodingStartWallTime;
     double decodingStartPTS;
     BOOL firstAudioFrameSeen;
+    BOOL eofReached;
 }
 
 - (id) init {
@@ -62,6 +63,7 @@ static __weak FFmpegDecoder *gCurrentDecoder = nil;
         audioFirstPacketLogged = NO;
         engineInitialized = NO;
         firstAudioFrameSeen = NO;
+        eofReached = NO;
         decodingStartWallTime = 0;
         decodingStartPTS = 0;
     }
@@ -343,8 +345,11 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
             av_packet_free(&pkt);
             if (ret == AVERROR_EOF) {
                 [self logToFile:@"FFmpeg## readThread EOF"];
-                //[self stopDecoding];
-                //if (self->currentState != 6) { [self sendCurrentState:6]; }
+                // 즉시 종료하지 않고 플래그만 세팅 → decode thread가 큐를 모두 소진한 후 종료
+                [self->queueCondition lock];
+                self->eofReached = YES;
+                [self->queueCondition signal];
+                [self->queueCondition unlock];
             } else {
                 [self logToFile:[NSString stringWithFormat:@"FFmpeg## readThread error: %d", ret]];
             }
@@ -392,6 +397,14 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
         BOOL wasPaused = NO;
         // pause 중이거나 큐가 비어있으면 대기
         while (!self->decodingStopped && (self->isPaused || self->packetQueue.count == 0)) {
+
+            // 큐가 비었고 EOF에 도달했으면 → 영상 끝까지 재생 완료
+            if (!self->isPaused && self->packetQueue.count == 0 && self->eofReached) {
+                [self->queueCondition unlock];
+                [self stopDecoding];
+                if (self->currentState != 6) { [self sendCurrentState:6]; }
+                goto decoding_done;
+            }
 
             if (self->isPaused) {
                 wasPaused = YES;
@@ -522,6 +535,7 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
         av_packet_free(&pkt);
     }
 
+decoding_done:
     // Read thread가 av_read_frame 중일 수 있으므로 완전히 종료될 때까지 대기.
     // clear()에서 pFormatContext를 해제하기 전에 반드시 read thread가 끝나야 함.
     dispatch_sync(mReadQueue, ^{});
