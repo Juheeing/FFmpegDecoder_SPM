@@ -352,8 +352,8 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
         }
 
         [self->queueCondition lock];
-        // 큐가 꽉 차면 decode thread가 소비할 때까지 대기 (최대 500패킷 ≈ 5~8초 버퍼)
-        while (self->packetQueue.count >= 500 && !self->decodingStopped) {
+        // 큐가 꽉 차면 decode thread가 소비할 때까지 대기 (최대 5000패킷 ≈ 60초 버퍼)
+        while (self->packetQueue.count >= 5000 && !self->decodingStopped) {
             [self->queueCondition wait];
         }
         if (!self->decodingStopped) {
