@@ -25,7 +25,10 @@ static __weak FFmpegDecoder *gCurrentDecoder = nil;
     double pendingSeekSeconds;   // 사용자가 요청한 seek 시간
     BOOL needLog, needInterrupt;
     NSString *logFilePath;
-    NSCondition *pauseCondition;
+    NSCondition *pauseCondition;  // stopDecoding 등 기존 호환용
+    NSMutableArray *packetQueue;  // read/decode thread 간 패킷 공유 큐
+    NSCondition *queueCondition;  // 큐 + pause/resume 동기화
+    dispatch_queue_t mReadQueue;
     int64_t lastRescaledPTS;      // 이전 프레임 pts (rescaled)
     int64_t ptsOffset;           // 누적 offset
     int currentState;
@@ -42,6 +45,8 @@ static __weak FFmpegDecoder *gCurrentDecoder = nil;
     if (self = [super init]) {
         mDecodingQueue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
         pauseCondition = [[NSCondition alloc] init];
+        queueCondition = [[NSCondition alloc] init];
+        mReadQueue = dispatch_queue_create("com.ffmpeg.readqueue", DISPATCH_QUEUE_SERIAL);
         decodingStopped = NO;
         isPaused = NO;
         isPlaying = YES;
@@ -166,10 +171,10 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
 - (void)stopDecoding {
     [self logToFile:@"FFmpeg## stopDecoding"];
     if (currentState != 0) { [self sendCurrentState:0]; }
-    [self->pauseCondition lock];
+    [self->queueCondition lock];
     self->decodingStopped = YES;
-    [self->pauseCondition signal];
-    [self->pauseCondition unlock];
+    [self->queueCondition broadcast];
+    [self->queueCondition unlock];
 }
 
 - (BOOL)isPlaying {
@@ -177,31 +182,25 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
 }
 
 - (void)pause {
-    dispatch_async(mDecodingQueue, ^{
-        [self->pauseCondition lock];
-        self->isPaused = YES;
-        [self->pauseCondition unlock];
-    });
+    [self->queueCondition lock];
+    self->isPaused = YES;
+    [self->queueCondition unlock];
 }
 
 - (void)resume {
-    dispatch_async(mDecodingQueue, ^{
-        [self->pauseCondition lock];
-        self->isPaused = NO;
-        [self->pauseCondition signal];
-        [self->pauseCondition unlock];
-    });
+    [self->queueCondition lock];
+    self->isPaused = NO;
+    [self->queueCondition signal];
+    [self->queueCondition unlock];
 }
 
 - (void)seek:(double)seconds {
-    dispatch_async(mDecodingQueue, ^{
-        [self logToFile:@"FFmpeg## isSeeking"];
-        [self->pauseCondition lock];
-        self->seekTarget = seconds;
-        self->isSeeking = YES;
-        [self->pauseCondition signal];
-        [self->pauseCondition unlock];
-    });
+    [self logToFile:@"FFmpeg## isSeeking"];
+    [self->queueCondition lock];
+    self->seekTarget = seconds;
+    self->isSeeking = YES;
+    [self->queueCondition signal];
+    [self->queueCondition unlock];
 }
 
 - (void)sendCurrentState:(PlayerState)state {
@@ -334,123 +333,198 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
 }
 
 //파일로부터 인코딩 된 비디오, 오디오 데이터를 읽어서 packet에 저장하는 함수
-- (void) decoding {
-    
+// Read thread: 네트워크에서 패킷을 읽어 큐에 쌓음. Decode thread와 분리되어 pause 중에도 계속 실행.
+- (void)readThread {
+    while (!self->decodingStopped) {
+        AVPacket *pkt = av_packet_alloc();
+        int ret = av_read_frame(self->pFormatContext, pkt);
+
+        if (ret < 0) {
+            av_packet_free(&pkt);
+            if (ret == AVERROR_EOF) {
+                [self logToFile:@"FFmpeg## readThread EOF"];
+                //[self stopDecoding];
+                //if (self->currentState != 6) { [self sendCurrentState:6]; }
+            } else {
+                [self logToFile:[NSString stringWithFormat:@"FFmpeg## readThread error: %d", ret]];
+            }
+            break;
+        }
+
+        [self->queueCondition lock];
+        // 큐가 꽉 차면 decode thread가 소비할 때까지 대기 (최대 500패킷 ≈ 5~8초 버퍼)
+        while (self->packetQueue.count >= 500 && !self->decodingStopped) {
+            [self->queueCondition wait];
+        }
+        if (!self->decodingStopped) {
+            [self->packetQueue addObject:[NSValue valueWithPointer:pkt]];
+            [self->queueCondition signal];
+        } else {
+            av_packet_free(&pkt);
+        }
+        [self->queueCondition unlock];
+    }
+
+    // decode thread가 대기 중일 수 있으므로 깨워서 종료 확인하게 함
+    [self->queueCondition lock];
+    [self->queueCondition broadcast];
+    [self->queueCondition unlock];
+}
+
+- (void)decoding {
     if (currentState != 1) { [self sendCurrentState:1]; }
     vFrame = av_frame_alloc();
     aFrame = av_frame_alloc();
-    packet = *av_packet_alloc();
-    
+    packetQueue = [NSMutableArray array];
+
     outputFrameSize = CGSizeMake(self->pVCtx->width, self->pVCtx->height);
     [self logToFile:[NSString stringWithFormat:@"FFmpeg## Video Resolution: %.0f x %.0f", outputFrameSize.width, outputFrameSize.height]];
 
-    while (!self->decodingStopped && pFormatContext != NULL) {
-        
-        if (currentState != 2) { [self sendCurrentState:2]; }
-        
-        while (!self->decodingStopped && [self readFrame:&packet] >= 0) {
-            
-            [self->_delegate receivedVideoSize:outputFrameSize];
-            
-            [self->pauseCondition lock];
-            
-            BOOL wasPaused = NO;
-            while (!self->decodingStopped && self->isPaused) {
+    // Read thread 시작: pause 중에도 독립적으로 패킷 수신 지속 → decoder state 보존, IDR 불필요
+    dispatch_async(mReadQueue, ^{ [self readThread]; });
+
+    if (currentState != 2) { [self sendCurrentState:2]; }
+
+    while (!self->decodingStopped) {
+
+        [self->queueCondition lock];
+
+        BOOL wasPaused = NO;
+        // pause 중이거나 큐가 비어있으면 대기
+        while (!self->decodingStopped && (self->isPaused || self->packetQueue.count == 0)) {
+
+            if (self->isPaused) {
                 wasPaused = YES;
-                [self readPause];
-                if (_player.isPlaying) {
-                    [_player pause];
+                if (self->isPlaying) {
+                    self->isPlaying = NO;
+                    if (self->_player.isPlaying) { [self->_player stop]; }
+                    if (self->currentState != 5) { [self sendCurrentState:5]; }
                 }
                 if (self->isSeeking) {
                     [self logToFile:@"FFmpeg## readSeek"];
+                    // 큐에 남은 패킷 전부 폐기 후 seek
+                    for (NSValue *w in self->packetQueue) {
+                        AVPacket *p = (AVPacket *)[w pointerValue];
+                        av_packet_free(&p);
+                    }
+                    [self->packetQueue removeAllObjects];
+                    double target = self->seekTarget;
                     self->isSeeking = NO;
-                    [self readSeek:seekTarget];
-                }
-                [self->pauseCondition wait];
-            }
-            [self->pauseCondition unlock];
+                    [self->queueCondition signal]; // read thread 깨우기 (큐 공간 생김)
+                    [self->queueCondition unlock];
 
-            // pause에서 실제로 대기했다가 resume된 경우에만 타이밍 리셋
-            if (wasPaused) {
-                firstAudioFrameSeen = NO;
-            }
+                    [self readSeek:target];
+                    if (self->pVCtx) avcodec_flush_buffers(self->pVCtx);
+                    if (self->pACtx) avcodec_flush_buffers(self->pACtx);
+                    self->firstAudioFrameSeen = NO;
 
-            if (!self->isPlaying) {
-                [self readPlay];
-                if (currentState != 2) { [self sendCurrentState:2]; }
-            }
-
-            NSString *trackTag = (packet.stream_index == vidx) ? @"V" : ((packet.stream_index == aidx) ? @"A" : @"?");
-            [self logToFile:[NSString stringWithFormat:@"FFmpeg## [PKT.%@] pts=%lld dts=%lld", trackTag, (long long)packet.pts, (long long)packet.dts]];
-
-            if (packet.stream_index == vidx) {
-                if ([self sendPacket:pVCtx packet:&packet] >= 0) {
-                    int ret = [self receiveFrame:pVCtx frame:vFrame];
-                    if (ret >= 0) {
-                        if (!videoFirstPacketLogged) {
-                            videoFirstPacketLogged = YES;
-                            AVRational tb = pVStream->time_base;
-                            [self logToFile:[NSString stringWithFormat:@"FFmpeg## [Video] first frame — frame_pts=%lld best_effort=%lld pkt_pts=%lld tb=%d/%d",
-                                (long long)vFrame->pts, (long long)vFrame->best_effort_timestamp, (long long)packet.pts, tb.num, tb.den]];
-                        }
-                        if (!videoFirstValidPTSLogged) {
-                            int64_t rawPTS = (vFrame->pts != AV_NOPTS_VALUE) ? vFrame->pts : vFrame->best_effort_timestamp;
-                            AVRational tb = pVStream->time_base;
-                            if (rawPTS != AV_NOPTS_VALUE && tb.den > 0) {
-                                videoFirstValidPTSLogged = YES;
-                                double ptsSec = (double)rawPTS * tb.num / tb.den;
-                                [self logToFile:[NSString stringWithFormat:@"FFmpeg## [Video] first valid PTS — frame_pts=%lld best_effort=%lld pts_sec=%.4f",
-                                    (long long)vFrame->pts, (long long)vFrame->best_effort_timestamp, ptsSec]];
-                            }
-                        }
-                        if (aidx < 0) { // 오디오가 없는 영상(타임랩스 등)
-                            [self getCurrentTime:vFrame stream:pVStream];
-                        }
-                        [self drawImage];
-                    }
+                    [self->queueCondition lock];
+                    wasPaused = NO;
                 }
             }
-            if (packet.stream_index == aidx) {
-                if ([self sendPacket:pACtx packet:&packet] >= 0) {
-                    int ret = [self receiveFrame:pACtx frame:aFrame];
-                    if (ret >= 0) {
-                        if (!audioFirstPacketLogged) {
-                            int64_t rawPTS = (aFrame->pts != AV_NOPTS_VALUE) ? aFrame->pts : aFrame->best_effort_timestamp;
-                            if (rawPTS != AV_NOPTS_VALUE && pAStream) {
-                                audioFirstPacketLogged = YES;
-                                AVRational tb = pAStream->time_base;
-                                double ptsSec = (double)rawPTS * tb.num / tb.den;
-                                int64_t dts = aFrame->pkt_dts;
-                                [self logToFile:[NSString stringWithFormat:@"FFmpeg## [Audio] first packet — pts=%lld dts=%lld tb=%d/%d pts_sec=%.4f sampleRate=%dHz",
-                                    (long long)rawPTS, (long long)dts, tb.num, tb.den, ptsSec, aFrame->sample_rate]];
-                            }
-                        }
-                        // AV sync: audio PTS 기반으로 decode loop 속도 제어
-                        int64_t syncPTS = (aFrame->pts != AV_NOPTS_VALUE) ? aFrame->pts : aFrame->best_effort_timestamp;
-                        if (syncPTS != AV_NOPTS_VALUE && pAStream) {
-                            double ptsSec = syncPTS * av_q2d(pAStream->time_base);
-                            struct timeval tv;
-                            gettimeofday(&tv, NULL);
-                            double now = tv.tv_sec + tv.tv_usec / 1e6;
-                            if (!firstAudioFrameSeen) {
-                                firstAudioFrameSeen = YES;
-                                decodingStartWallTime = now;
-                                decodingStartPTS = ptsSec;
-                            } else {
-                                double sleepSec = (ptsSec - decodingStartPTS) - (now - decodingStartWallTime);
-                                if (sleepSec > 0.001 && sleepSec < 1.0) {
-                                    usleep((useconds_t)(sleepSec * 1e6));
-                                }
-                            }
-                        }
-                        [self getCurrentTime:aFrame stream:pAStream];
-                        [self drawAudio];
-                    }
-                }
-            }
-            av_packet_unref(&packet);
+
+            [self->queueCondition wait];
         }
+
+        if (self->decodingStopped) {
+            [self->queueCondition unlock];
+            break;
+        }
+
+        // pause → resume 전환: A/V sync 재보정
+        if (!self->isPlaying) {
+            self->isPlaying = YES;
+            if (wasPaused) { self->firstAudioFrameSeen = NO; }
+            if (self.player && !self.player.isPlaying) { [self.player play]; }
+            if (self->currentState != 4) { [self sendCurrentState:4]; }
+            if (self->currentState != 2) { [self sendCurrentState:2]; }
+        }
+
+        // 큐에서 패킷 꺼내기
+        NSValue *wrapper = self->packetQueue.firstObject;
+        [self->packetQueue removeObjectAtIndex:0];
+        [self->queueCondition signal]; // read thread에 큐 공간 생겼음을 알림
+        [self->queueCondition unlock];
+
+        AVPacket *pkt = (AVPacket *)[wrapper pointerValue];
+
+        [self->_delegate receivedVideoSize:outputFrameSize];
+
+        NSString *trackTag = (pkt->stream_index == vidx) ? @"V" : ((pkt->stream_index == aidx) ? @"A" : @"?");
+        [self logToFile:[NSString stringWithFormat:@"FFmpeg## [PKT.%@] pts=%lld dts=%lld", trackTag, (long long)pkt->pts, (long long)pkt->dts]];
+
+        if (pkt->stream_index == vidx) {
+            if ([self sendPacket:pVCtx packet:pkt] >= 0) {
+                int ret = [self receiveFrame:pVCtx frame:vFrame];
+                if (ret >= 0) {
+                    if (!videoFirstPacketLogged) {
+                        videoFirstPacketLogged = YES;
+                        AVRational tb = pVStream->time_base;
+                        [self logToFile:[NSString stringWithFormat:@"FFmpeg## [Video] first frame — frame_pts=%lld best_effort=%lld pkt_pts=%lld tb=%d/%d",
+                            (long long)vFrame->pts, (long long)vFrame->best_effort_timestamp, (long long)pkt->pts, tb.num, tb.den]];
+                    }
+                    if (!videoFirstValidPTSLogged) {
+                        int64_t rawPTS = (vFrame->pts != AV_NOPTS_VALUE) ? vFrame->pts : vFrame->best_effort_timestamp;
+                        AVRational tb = pVStream->time_base;
+                        if (rawPTS != AV_NOPTS_VALUE && tb.den > 0) {
+                            videoFirstValidPTSLogged = YES;
+                            double ptsSec = (double)rawPTS * tb.num / tb.den;
+                            [self logToFile:[NSString stringWithFormat:@"FFmpeg## [Video] first valid PTS — frame_pts=%lld best_effort=%lld pts_sec=%.4f",
+                                (long long)vFrame->pts, (long long)vFrame->best_effort_timestamp, ptsSec]];
+                        }
+                    }
+                    if (aidx < 0) { // 오디오가 없는 영상(타임랩스 등)
+                        [self getCurrentTime:vFrame stream:pVStream];
+                    }
+                    [self drawImage];
+                }
+            }
+        }
+        if (pkt->stream_index == aidx) {
+            if ([self sendPacket:pACtx packet:pkt] >= 0) {
+                int ret = [self receiveFrame:pACtx frame:aFrame];
+                if (ret >= 0) {
+                    if (!audioFirstPacketLogged) {
+                        int64_t rawPTS = (aFrame->pts != AV_NOPTS_VALUE) ? aFrame->pts : aFrame->best_effort_timestamp;
+                        if (rawPTS != AV_NOPTS_VALUE && pAStream) {
+                            audioFirstPacketLogged = YES;
+                            AVRational tb = pAStream->time_base;
+                            double ptsSec = (double)rawPTS * tb.num / tb.den;
+                            int64_t dts = aFrame->pkt_dts;
+                            [self logToFile:[NSString stringWithFormat:@"FFmpeg## [Audio] first packet — pts=%lld dts=%lld tb=%d/%d pts_sec=%.4f sampleRate=%dHz",
+                                (long long)rawPTS, (long long)dts, tb.num, tb.den, ptsSec, aFrame->sample_rate]];
+                        }
+                    }
+                    // AV sync: audio PTS 기반으로 decode loop 속도 제어
+                    int64_t syncPTS = (aFrame->pts != AV_NOPTS_VALUE) ? aFrame->pts : aFrame->best_effort_timestamp;
+                    if (syncPTS != AV_NOPTS_VALUE && pAStream) {
+                        double ptsSec = syncPTS * av_q2d(pAStream->time_base);
+                        struct timeval tv;
+                        gettimeofday(&tv, NULL);
+                        double now = tv.tv_sec + tv.tv_usec / 1e6;
+                        if (!firstAudioFrameSeen) {
+                            firstAudioFrameSeen = YES;
+                            decodingStartWallTime = now;
+                            decodingStartPTS = ptsSec;
+                        } else {
+                            double sleepSec = (ptsSec - decodingStartPTS) - (now - decodingStartWallTime);
+                            if (sleepSec > 0.001 && sleepSec < 1.0) {
+                                usleep((useconds_t)(sleepSec * 1e6));
+                            }
+                        }
+                    }
+                    [self getCurrentTime:aFrame stream:pAStream];
+                    [self drawAudio];
+                }
+            }
+        }
+
+        av_packet_free(&pkt);
     }
+
+    // Read thread가 av_read_frame 중일 수 있으므로 완전히 종료될 때까지 대기.
+    // clear()에서 pFormatContext를 해제하기 전에 반드시 read thread가 끝나야 함.
+    dispatch_sync(mReadQueue, ^{});
     [self clear];
 }
 
