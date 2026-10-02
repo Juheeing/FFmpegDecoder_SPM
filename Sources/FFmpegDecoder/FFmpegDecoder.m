@@ -40,6 +40,7 @@ static __weak FFmpegDecoder *gCurrentDecoder = nil;
     double decodingStartPTS;
     BOOL firstAudioFrameSeen;
     BOOL eofReached;
+    BOOL usePacketQueue;
 }
 
 - (id) init {
@@ -157,8 +158,16 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
 
 - (void)startStreaming:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options
                needLog:(BOOL)needLog needInterrupt:(BOOL)needInterrupt {
+    [self startStreaming:url withOptions:options needLog:needLog needInterrupt:needInterrupt usePacketQueue:NO];
+}
+
+- (void)startStreaming:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options
+               needLog:(BOOL)needLog needInterrupt:(BOOL)needInterrupt
+        usePacketQueue:(BOOL)usePacketQueue {
     gCurrentDecoder = self;
     self->decodingStopped = NO;
+    self->eofReached = NO;
+    self->usePacketQueue = usePacketQueue;
     self->needLog = needLog;
     self->needInterrupt = needInterrupt;
     if (needLog) [self setupLogFilePath];
@@ -377,6 +386,14 @@ static void ffmpeg_log_callback(void* ptr, int level, const char* fmt, va_list v
 }
 
 - (void)decoding {
+    if (usePacketQueue) {
+        [self decodingWithQueue];
+    } else {
+        [self decodingOriginal];
+    }
+}
+
+- (void)decodingWithQueue {
     if (currentState != 1) { [self sendCurrentState:1]; }
     vFrame = av_frame_alloc();
     aFrame = av_frame_alloc();
@@ -539,6 +556,120 @@ decoding_done:
     // Read thread가 av_read_frame 중일 수 있으므로 완전히 종료될 때까지 대기.
     // clear()에서 pFormatContext를 해제하기 전에 반드시 read thread가 끝나야 함.
     dispatch_sync(mReadQueue, ^{});
+    [self clear];
+}
+
+// 기존 단일 루프 방식: av_read_pause/av_read_play로 서버 제어
+- (void)decodingOriginal {
+    if (currentState != 1) { [self sendCurrentState:1]; }
+    vFrame = av_frame_alloc();
+    aFrame = av_frame_alloc();
+    packet = *av_packet_alloc();
+
+    outputFrameSize = CGSizeMake(self->pVCtx->width, self->pVCtx->height);
+    [self logToFile:[NSString stringWithFormat:@"FFmpeg## Video Resolution: %.0f x %.0f", outputFrameSize.width, outputFrameSize.height]];
+
+    while (!self->decodingStopped && pFormatContext != NULL) {
+
+        if (currentState != 2) { [self sendCurrentState:2]; }
+
+        while (!self->decodingStopped && [self readFrame:&packet] >= 0) {
+
+            [self->_delegate receivedVideoSize:outputFrameSize];
+
+            [self->queueCondition lock];
+
+            BOOL wasPaused = NO;
+            while (!self->decodingStopped && self->isPaused) {
+                wasPaused = YES;
+                [self readPause];
+                if (_player.isPlaying) { [_player stop]; }
+                if (self->isSeeking) {
+                    [self logToFile:@"FFmpeg## readSeek"];
+                    self->isSeeking = NO;
+                    [self readSeek:seekTarget];
+                }
+                [self->queueCondition wait];
+            }
+            [self->queueCondition unlock];
+
+            if (wasPaused) { firstAudioFrameSeen = NO; }
+
+            if (!self->isPlaying) {
+                [self readPlay];
+                if (currentState != 2) { [self sendCurrentState:2]; }
+            }
+
+            NSString *trackTag = (packet.stream_index == vidx) ? @"V" : ((packet.stream_index == aidx) ? @"A" : @"?");
+            [self logToFile:[NSString stringWithFormat:@"FFmpeg## [PKT.%@] pts=%lld dts=%lld", trackTag, (long long)packet.pts, (long long)packet.dts]];
+
+            if (packet.stream_index == vidx) {
+                if ([self sendPacket:pVCtx packet:&packet] >= 0) {
+                    int ret = [self receiveFrame:pVCtx frame:vFrame];
+                    if (ret >= 0) {
+                        if (!videoFirstPacketLogged) {
+                            videoFirstPacketLogged = YES;
+                            AVRational tb = pVStream->time_base;
+                            [self logToFile:[NSString stringWithFormat:@"FFmpeg## [Video] first frame — frame_pts=%lld best_effort=%lld pkt_pts=%lld tb=%d/%d",
+                                (long long)vFrame->pts, (long long)vFrame->best_effort_timestamp, (long long)packet.pts, tb.num, tb.den]];
+                        }
+                        if (!videoFirstValidPTSLogged) {
+                            int64_t rawPTS = (vFrame->pts != AV_NOPTS_VALUE) ? vFrame->pts : vFrame->best_effort_timestamp;
+                            AVRational tb = pVStream->time_base;
+                            if (rawPTS != AV_NOPTS_VALUE && tb.den > 0) {
+                                videoFirstValidPTSLogged = YES;
+                                double ptsSec = (double)rawPTS * tb.num / tb.den;
+                                [self logToFile:[NSString stringWithFormat:@"FFmpeg## [Video] first valid PTS — frame_pts=%lld best_effort=%lld pts_sec=%.4f",
+                                    (long long)vFrame->pts, (long long)vFrame->best_effort_timestamp, ptsSec]];
+                            }
+                        }
+                        if (aidx < 0) {
+                            [self getCurrentTime:vFrame stream:pVStream];
+                        }
+                        [self drawImage];
+                    }
+                }
+            }
+            if (packet.stream_index == aidx) {
+                if ([self sendPacket:pACtx packet:&packet] >= 0) {
+                    int ret = [self receiveFrame:pACtx frame:aFrame];
+                    if (ret >= 0) {
+                        if (!audioFirstPacketLogged) {
+                            int64_t rawPTS = (aFrame->pts != AV_NOPTS_VALUE) ? aFrame->pts : aFrame->best_effort_timestamp;
+                            if (rawPTS != AV_NOPTS_VALUE && pAStream) {
+                                audioFirstPacketLogged = YES;
+                                AVRational tb = pAStream->time_base;
+                                double ptsSec = (double)rawPTS * tb.num / tb.den;
+                                int64_t dts = aFrame->pkt_dts;
+                                [self logToFile:[NSString stringWithFormat:@"FFmpeg## [Audio] first packet — pts=%lld dts=%lld tb=%d/%d pts_sec=%.4f sampleRate=%dHz",
+                                    (long long)rawPTS, (long long)dts, tb.num, tb.den, ptsSec, aFrame->sample_rate]];
+                            }
+                        }
+                        int64_t syncPTS = (aFrame->pts != AV_NOPTS_VALUE) ? aFrame->pts : aFrame->best_effort_timestamp;
+                        if (syncPTS != AV_NOPTS_VALUE && pAStream) {
+                            double ptsSec = syncPTS * av_q2d(pAStream->time_base);
+                            struct timeval tv;
+                            gettimeofday(&tv, NULL);
+                            double now = tv.tv_sec + tv.tv_usec / 1e6;
+                            if (!firstAudioFrameSeen) {
+                                firstAudioFrameSeen = YES;
+                                decodingStartWallTime = now;
+                                decodingStartPTS = ptsSec;
+                            } else {
+                                double sleepSec = (ptsSec - decodingStartPTS) - (now - decodingStartWallTime);
+                                if (sleepSec > 0.001 && sleepSec < 1.0) {
+                                    usleep((useconds_t)(sleepSec * 1e6));
+                                }
+                            }
+                        }
+                        [self getCurrentTime:aFrame stream:pAStream];
+                        [self drawAudio];
+                    }
+                }
+            }
+            av_packet_unref(&packet);
+        }
+    }
     [self clear];
 }
 

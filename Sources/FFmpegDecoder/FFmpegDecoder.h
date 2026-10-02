@@ -37,6 +37,9 @@ typedef NS_ENUM(NSInteger, PlayerState) {
 
 - (void)startStreaming:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options
                needLog:(BOOL)needLog needInterrupt:(BOOL)needInterrupt;
+- (void)startStreaming:(NSString *)url withOptions:(NSDictionary<NSString *, NSString *> *)options
+               needLog:(BOOL)needLog needInterrupt:(BOOL)needInterrupt
+        usePacketQueue:(BOOL)usePacketQueue;
 - (void) stopDecoding;
 - (void) pause;
 - (void) resume;
